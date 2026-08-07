@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# Project Memory runtime data and keys must never enter this repository.
+codex-project-memory/
+memory.sqlite3*
+master.key
+registry.json
+backups/
+.env
+.env.*

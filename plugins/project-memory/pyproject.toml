@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-project-memory"
+version = "0.1.0"
+description = "Local project-scoped operational memory MCP for Codex"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "woffko" }]
+dependencies = ["cryptography>=41,<47"]
+keywords = ["codex", "mcp", "memory", "sqlite"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+]
+
+[project.urls]
+Homepage = "https://github.com/woffko/codex-project-memory"
+Repository = "https://github.com/woffko/codex-project-memory"
+
+[project.scripts]
+codex-project-memory = "project_memory_mcp:main"
+
+[tool.setuptools]
+py-modules = ["project_memory_mcp"]
+
+[tool.setuptools.package-dir]
+"" = "scripts"

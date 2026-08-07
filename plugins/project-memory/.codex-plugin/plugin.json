@@ -1,0 +1,28 @@
+{
+  "name": "project-memory",
+  "version": "0.1.0",
+  "description": "Local, project-scoped operational memory for recurring actions and verified solutions.",
+  "author": {
+    "name": "woffko",
+    "url": "https://github.com/woffko"
+  },
+  "homepage": "https://github.com/woffko/codex-project-memory#readme",
+  "repository": "https://github.com/woffko/codex-project-memory",
+  "license": "MIT",
+  "keywords": ["codex", "mcp", "memory", "knowledge-base", "sqlite"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Project Memory",
+    "shortDescription": "Remember verified project procedures locally.",
+    "longDescription": "Stores recurring actions, verified solutions, test-only asset access details, and log locations in a project-scoped local database outside Git.",
+    "developerName": "woffko",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": [
+      "Search project memory before troubleshooting.",
+      "Record this repeated action and verified outcome.",
+      "Show known test assets and log locations."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

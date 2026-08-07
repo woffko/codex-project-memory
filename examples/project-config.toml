@@ -1,0 +1,16 @@
+# Place these tables in a trusted project's .codex/config.toml.
+# Read/search and ordinary memory writes are automatic. Storing or revealing
+# test-only credentials and deprecating records require explicit approval.
+
+[plugins."project-memory".mcp_servers.project_memory]
+enabled = true
+default_tools_approval_mode = "auto"
+
+[plugins."project-memory".mcp_servers.project_memory.tools.project_memory_store_test_asset]
+approval_mode = "prompt"
+
+[plugins."project-memory".mcp_servers.project_memory.tools.project_memory_get_test_asset]
+approval_mode = "prompt"
+
+[plugins."project-memory".mcp_servers.project_memory.tools.project_memory_deprecate]
+approval_mode = "prompt"
