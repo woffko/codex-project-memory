@@ -1,31 +1,32 @@
 # Codex Project Memory
 
-Локальная проектная память для Codex через MCP. Она помогает находить уже
-выполненные процедуры, отслеживать повторяющиеся попытки и сохранять только
-проверенный итоговый вариант решения.
+Local, project-scoped operational memory for Codex, exposed through MCP. It
+helps Codex find previously completed procedures, track recurring attempts,
+and retain only a verified final solution.
 
-Данные каждого проекта находятся вне Git. Плагин не отправляет записи во
-внешний сервис и не добавляет базу, ключи или credentials в репозиторий.
+Each project's data lives outside Git. The plugin does not send records to an
+external service and does not place databases, encryption keys, or credentials
+in the project repository.
 
-## Что сохраняется
+## What it stores
 
-- повторяющиеся проблемы и действия-кандидаты;
-- финальные решения после минимум двух повторений и успешной проверки;
-- устойчивые расположения логов без копирования сырых логов;
-- сведения о явно тестовых ресурсах, включая зашифрованные credentials;
-- ревизии записей и локальный audit trail.
+- recurring problems and candidate actions;
+- final solutions after at least two occurrences and successful verification;
+- stable log locations without copying raw logs;
+- explicitly test-only asset details, including encrypted credentials;
+- record revisions and a local audit trail.
 
-Поиск использует SQLite FTS5. Секретные поля шифруются AES-256-GCM и не
-попадают в полнотекстовый индекс.
+Search uses SQLite FTS5. Secret fields are encrypted with AES-256-GCM and are
+never added to the full-text index.
 
-## Требования
+## Requirements
 
-- Linux, macOS или WSL;
+- Linux, macOS, or WSL;
 - Git;
-- Python 3.10+ с модулем `venv`;
-- актуальный Codex CLI с командами `codex plugin`.
+- Python 3.10+ with the `venv` module;
+- a recent Codex CLI with the `codex plugin` commands.
 
-## Установка с нуля
+## Install from scratch
 
 ```bash
 git clone https://github.com/woffko/codex-project-memory.git
@@ -34,26 +35,25 @@ chmod +x scripts/install.sh plugins/project-memory/scripts/run-project-memory.sh
 ./scripts/install.sh
 ```
 
-Установщик создаёт изолированный Python runtime в
-`${XDG_DATA_HOME:-~/.local/share}/codex-project-memory/runtime`, устанавливает
-зависимость `cryptography`, регистрирует локальный marketplace и устанавливает
-плагин `project-memory`.
+The installer creates an isolated Python runtime at
+`${XDG_DATA_HOME:-~/.local/share}/codex-project-memory/runtime`, installs the
+`cryptography` dependency, registers the cloned repository as a local Codex
+marketplace, and installs the `project-memory` plugin.
 
-Чтобы вместо локального checkout подключить marketplace непосредственно с
-GitHub:
+To register the marketplace directly from GitHub instead of keeping a local
+checkout:
 
 ```bash
 codex plugin marketplace add woffko/codex-project-memory --ref main
 codex plugin add project-memory@codex-project-memory
 ```
 
-При таком варианте Python всё равно должен иметь пакет `cryptography`; самый
-простой воспроизводимый способ — один раз запустить `scripts/install.sh` из
-клона.
+The direct GitHub method still requires Python with the `cryptography` package.
+The most reproducible setup is to run `scripts/install.sh` once from a clone.
 
-## Регистрация проекта
+## Enroll a project
 
-Перейдите в корень нужного проекта:
+Change to the root of the project that should receive its own memory:
 
 ```bash
 cd /path/to/project
@@ -62,9 +62,9 @@ cd /path/to/project
   --project-name "my-project"
 ```
 
-Обычная регистрация не разрешает хранить credentials. Если проект работает с
-ресурсами, которые явно являются только тестовыми, разрешение включается
-отдельно:
+A normal enrollment does not allow credential storage. Enable that capability
+separately only when the project works with resources explicitly classified as
+test-only:
 
 ```bash
 ~/.local/share/codex-project-memory/runtime/bin/codex-project-memory enroll \
@@ -73,74 +73,75 @@ cd /path/to/project
   --allow-test-secrets
 ```
 
-Флаг не означает «разрешить любые секреты». Он применяется только к записям
-`test_asset` с явным `test_only: true`. Production, personal и неоднозначно
-классифицированные credentials сохранять нельзя.
+This flag does not mean “allow every secret.” It applies only to `test_asset`
+records with an explicit `test_only: true`. Do not store production, personal,
+or ambiguously classified credentials.
 
-## Настройка Codex в проекте
+## Configure Codex in the project
 
-Добавьте таблицы из [`examples/project-config.toml`](examples/project-config.toml)
-в доверенный `.codex/config.toml`. Они оставляют чтение и обычную запись
-автоматическими, но требуют подтверждения для сохранения/раскрытия тестовых
-credentials и устаревания записи.
+Add the tables from
+[`examples/project-config.toml`](examples/project-config.toml) to the trusted
+project's `.codex/config.toml`. They keep reads and ordinary memory writes
+automatic, while requiring approval to store or reveal test-only credentials
+and to deprecate a record.
 
-Добавьте инструкции из [`examples/AGENTS.md`](examples/AGENTS.md) в проектный
-`AGENTS.md`. Плагин уже содержит skill с тем же workflow, но проектная
-инструкция делает поведение явным и долговечным.
+Add the guidance from [`examples/AGENTS.md`](examples/AGENTS.md) to the
+project's `AGENTS.md`. The plugin already bundles the same workflow as a skill,
+but project guidance makes the intended behavior explicit and durable.
 
-После установки или изменения конфигурации запустите новую Codex-сессию из
-корня зарегистрированного проекта:
+After installation or configuration changes, start a new Codex session from
+the enrolled project root:
 
 ```bash
 codex -C /path/to/project
 ```
 
-При `resume`, если Codex предлагает выбрать рабочий каталог, используйте
-каталог зарегистрированного проекта.
+When resuming a session, choose the enrolled project directory if Codex asks
+which working directory to use.
 
-## Как работает накопление решения
+## How a recurring action becomes a solution
 
-1. В начале диагностики Codex вызывает `project_memory_status` и
-   `project_memory_search`.
-2. Повторяющаяся проблема или действие записывается через
+1. Codex calls `project_memory_status` and `project_memory_search` before
+   troubleshooting.
+2. A recurring problem or action is recorded with
    `project_memory_note_repetition`.
-3. Сервер увеличивает счётчик одинакового кандидата по стабильному fingerprint.
-4. До двух повторений кандидат нельзя превратить в решение.
-5. После реального успешного теста Codex вызывает
-   `project_memory_finalize_solution`, сохраняя точные шаги, результат и способ
-   проверки.
+3. The server increments the matching candidate using a stable fingerprint.
+4. A candidate cannot become a solution before two occurrences are recorded.
+5. After a real successful check, Codex calls
+   `project_memory_finalize_solution` with the exact final steps, outcome, and
+   verification evidence.
 
-Непроверенные гипотезы и сырые логи не должны становиться финальными решениями.
+Untested hypotheses and raw logs should never become final solutions.
 
-## MCP-инструменты
+## MCP tools
 
-| Инструмент | Назначение |
+| Tool | Purpose |
 | --- | --- |
-| `project_memory_status` | Проверить регистрацию и число записей |
-| `project_memory_search` | Найти решения и метаданные без секретов |
-| `project_memory_get` | Прочитать обычную запись |
-| `project_memory_note_repetition` | Учесть повтор проблемы/действия |
-| `project_memory_finalize_solution` | Сохранить проверенный финальный вариант |
-| `project_memory_record_log_location` | Запомнить устойчивое расположение логов |
-| `project_memory_store_test_asset` | Сохранить тестовый ресурс и encrypted fields |
-| `project_memory_get_test_asset` | Раскрыть encrypted fields с подтверждением |
-| `project_memory_deprecate` | Мягко пометить запись устаревшей |
+| `project_memory_status` | Confirm enrollment and show record counts |
+| `project_memory_search` | Search solutions and metadata without secrets |
+| `project_memory_get` | Read a normal record |
+| `project_memory_note_repetition` | Record another occurrence of a problem/action |
+| `project_memory_finalize_solution` | Save the verified final variant |
+| `project_memory_record_log_location` | Remember a stable log location |
+| `project_memory_store_test_asset` | Store a test-only asset and encrypted fields |
+| `project_memory_get_test_asset` | Reveal encrypted fields with approval |
+| `project_memory_deprecate` | Soft-deprecate an obsolete record |
 
-## Прямое подключение только MCP
+## Connect only the MCP server
 
-Плагин удобнее, поскольку вместе с сервером устанавливает workflow skill. Если
-нужен только MCP:
+The plugin is preferred because it installs the workflow skill together with
+the server. To register only the MCP server:
 
 ```bash
 codex mcp add project_memory -- \
   ~/.local/share/codex-project-memory/runtime/bin/codex-project-memory serve
 ```
 
-После этого проект всё равно нужно зарегистрировать командой `enroll`.
+The project must still be registered with the `enroll` command.
 
-## Хранилище и резервные копии
+## Storage and backups
 
-По умолчанию:
+Default layout:
 
 ```text
 ~/.local/share/codex-project-memory/
@@ -154,37 +155,56 @@ codex mcp add project_memory -- \
 └── master.key
 ```
 
-Создать согласованную SQLite-копию:
+Create a consistent SQLite backup:
 
 ```bash
 ~/.local/share/codex-project-memory/runtime/bin/codex-project-memory backup \
   --project-root /path/to/project
 ```
 
-Не копируйте `master.key` в репозиторий. Для восстановления зашифрованных
-тестовых полей требуется и база, и соответствующий ключ.
+Never copy `master.key` into a repository. Restoring encrypted test fields
+requires both the database and its corresponding key.
 
-Подробнее: [`SECURITY.md`](SECURITY.md).
+See [`SECURITY.md`](SECURITY.md) for the full security boundary.
 
-## Проверка разработки
+## Update
+
+For an installation made from a local clone:
+
+```bash
+git pull --ff-only
+./scripts/install.sh
+```
+
+For a GitHub marketplace installation:
+
+```bash
+codex plugin marketplace upgrade codex-project-memory
+codex plugin add project-memory@codex-project-memory
+```
+
+Start a new Codex thread after updating so the refreshed skill and MCP tool
+definitions are loaded.
+
+## Development checks
 
 ```bash
 python3 plugins/project-memory/scripts/test_project_memory.py
 python3 /path/to/plugin-creator/scripts/validate_plugin.py plugins/project-memory
 ```
 
-Тесты проверяют минимальное число повторений, финализацию после верификации,
-изоляцию проектов, отказ обычных записей принимать credentials и отсутствие
-открытого тестового пароля в SQLite.
+The tests cover the minimum occurrence count, verified finalization, project
+isolation, rejection of credentials in normal records, XDG storage paths, and
+the absence of plaintext test credentials in SQLite.
 
-## Удаление
+## Uninstall
 
 ```bash
 ./scripts/uninstall.sh
 ```
 
-Удаление плагина намеренно не удаляет локальные базы и резервные копии.
+Uninstalling the plugin intentionally preserves local databases and backups.
 
-## Лицензия
+## License
 
-MIT — см. [`LICENSE`](LICENSE).
+MIT. See [`LICENSE`](LICENSE).
