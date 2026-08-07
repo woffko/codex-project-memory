@@ -14,10 +14,12 @@ in the project repository.
 - final solutions after at least two occurrences and successful verification;
 - stable log locations without copying raw logs;
 - explicitly test-only asset details, including encrypted credentials;
-- record revisions and a local audit trail.
+- record revisions and a local audit trail;
+- local usage aggregates and sanitized error diagnostics.
 
 Search uses SQLite FTS5. Secret fields are encrypted with AES-256-GCM and are
-never added to the full-text index.
+never added to the full-text index. Usage metrics never contain queries, tool
+arguments, project paths, record contents, record IDs, or credentials.
 
 ## Requirements
 
@@ -161,8 +163,48 @@ which working directory to use.
 5. After a real successful check, Codex calls
    `project_memory_finalize_solution` with the exact final steps, outcome, and
    verification evidence.
+6. When a retrieved record is applied or found unsuitable, Codex calls
+   `project_memory_mark_used` with `reused`, `helpful`, `not_applicable`, or
+   `stale` so usage reports distinguish retrieval from actual reuse.
 
 Untested hypotheses and raw logs should never become final solutions.
+
+## Local usage and error reports
+
+Every project-scoped MCP call updates local daily aggregates in
+`usage.sqlite3`. Probes, reads, creates, edits, reuse feedback, search hits,
+errors, active days, and approximate MCP server runs remain separate. A server
+run is not an exact Codex thread count because the MCP protocol does not supply
+a stable Codex session identifier. Successful `project_memory_stats` calls are
+not counted, avoiding an observer effect in the reported totals.
+
+The dedicated reporter opens metrics in SQLite read-only mode and never opens
+project content databases or decrypts records:
+
+```bash
+~/.local/share/codex-project-memory/runtime/bin/codex-project-memory-report \
+  summary --all --since 30d
+
+~/.local/share/codex-project-memory/runtime/bin/codex-project-memory-report \
+  summary --project OpenMeta --include-children --since 90d
+
+~/.local/share/codex-project-memory/runtime/bin/codex-project-memory-report \
+  errors --project OpenMeta/OpenMeta-c --since 30d
+
+~/.local/share/codex-project-memory/runtime/bin/codex-project-memory-report \
+  errors --all --last 20 --error-code sqlite_busy
+```
+
+Both commands support `--format table`, `--format json`, and `--format csv`.
+Individual sanitized errors use a 90-day retention window; expired events are
+pruned when the next error is recorded. They contain a generated error ID,
+project ID, tool, operation, category, phase, structured error code, exception
+type, machine-readable SQLite or OS code when available, server version, and a
+stable fingerprint. Raw exception messages and user values are not retained.
+
+Set `PROJECT_MEMORY_METRICS=0` in the MCP server environment to disable new
+collection. Existing metrics remain available to the read-only reporter until
+removed manually.
 
 ## MCP tools
 
@@ -175,11 +217,13 @@ Project keys select memory but are not authentication credentials.
 | `project_memory_status` | Confirm enrollment and show counts plus parent/child routing |
 | `project_memory_search` | Search one selected project's records without secrets |
 | `project_memory_get` | Read a normal record from one selected project |
+| `project_memory_stats` | Read local usage aggregates and sanitized error groups |
 | `project_memory_note_repetition` | Record another occurrence of a problem/action |
 | `project_memory_finalize_solution` | Save the verified final variant |
 | `project_memory_record_log_location` | Remember a stable log location |
 | `project_memory_store_test_asset` | Store a test-only asset and encrypted fields |
 | `project_memory_get_test_asset` | Reveal encrypted fields with approval |
+| `project_memory_mark_used` | Mark a retrieved record as reused, helpful, unsuitable, or stale |
 | `project_memory_deprecate` | Soft-deprecate an obsolete record |
 
 ## Connect only the MCP server
@@ -201,6 +245,7 @@ Default layout:
 ```text
 ~/.local/share/codex-project-memory/
 ├── registry.json
+├── usage.sqlite3
 ├── runtime/
 └── projects/<project-id>/
     ├── memory.sqlite3
@@ -255,13 +300,15 @@ definitions are loaded.
 
 ```bash
 python3 plugins/project-memory/scripts/test_project_memory.py
+python3 plugins/project-memory/scripts/test_project_memory_metrics.py
 python3 /path/to/plugin-creator/scripts/validate_plugin.py plugins/project-memory
 ```
 
 The tests cover hierarchical project routing, legacy registry migration,
 stable encrypted-record identity, minimum occurrence counts, verified
-finalization, project isolation, credential rejection, XDG storage paths, and
-the absence of plaintext test credentials in SQLite.
+finalization, project isolation, credential rejection, XDG storage paths,
+operation classification, hierarchy reports, read-only reporting, structured
+errors, and the absence of plaintext credentials and project paths in metrics.
 
 ## Uninstall
 
@@ -269,7 +316,8 @@ the absence of plaintext test credentials in SQLite.
 ./scripts/uninstall.sh
 ```
 
-Uninstalling the plugin intentionally preserves local databases and backups.
+Uninstalling the plugin intentionally preserves local databases, usage
+metrics, sanitized errors, and backups.
 
 ## License
 

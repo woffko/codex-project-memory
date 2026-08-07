@@ -1,6 +1,6 @@
 ---
 name: project-memory
-description: Use local project-scoped MCP memory when troubleshooting, repeating operational actions, working with enrolled test equipment, or locating project logs. Route meta-project work through the hierarchical project keys declared in AGENTS, search before repeating work, and save only a verified final solution.
+description: Use local project-scoped MCP memory when troubleshooting, repeating operational actions, working with enrolled test equipment, locating project logs, or inspecting local usage and sanitized failures. Route meta-project work through the hierarchical project keys declared in AGENTS, search before repeating work, and save only a verified final solution.
 ---
 
 # Project Memory workflow
@@ -34,6 +34,9 @@ its first child is enrolled.
 2. Search the declared parent project separately for relevant shared memory.
 3. Reuse a stored solution only when its project, context, and verification
    still match.
+4. After applying or evaluating a retrieved record, call
+   `project_memory_mark_used` with `reused`, `helpful`, `not_applicable`, or
+   `stale`. Retrieval alone does not prove that memory helped.
 
 ## Repetitions and final solutions
 
@@ -71,6 +74,12 @@ its first child is enrolled.
 
 - Use `project_memory_get` for ordinary records; it never reveals encrypted
   fields.
+- Use `project_memory_stats` only when the user asks about local usage or
+  failures. It reports aggregate project activity and sanitized error groups;
+  MCP server runs are only an approximation of Codex sessions.
+- When a memory tool returns an `error_id`, keep it available for local
+  diagnosis, but do not invent or expose raw error details that were not
+  returned.
 - Deprecate stale records instead of deleting them. Record why the old solution
   is no longer valid.
 - If the MCP server or mapped project is unavailable, say so; do not claim that

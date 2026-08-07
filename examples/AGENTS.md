@@ -26,6 +26,9 @@ for this workspace.
 - At the start of troubleshooting or repeated operational work, call
   `project_memory_status` with the mapped `project` key, then search for the
   task, error signature, command, device, or log purpose.
+- After evaluating a retrieved record, call `project_memory_mark_used` with
+  `reused`, `helpful`, `not_applicable`, or `stale`; a search hit alone does not
+  mean the memory was used.
 - Call `project_memory_note_repetition` when substantially the same problem or
   action recurs while an effective final variant is still being sought.
 - Finalize a candidate only after at least two recorded occurrences and
@@ -41,3 +44,6 @@ for this workspace.
   personal, or ambiguously classified credentials.
 - If Project Memory is unavailable, say so rather than claiming it was
   searched or updated.
+- Use `project_memory_stats` when the user asks for local usage or sanitized
+  failure statistics. Treat reported server runs as approximate, not exact
+  Codex session counts.

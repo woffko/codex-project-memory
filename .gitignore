@@ -10,6 +10,7 @@ build/
 # Project Memory runtime data and keys must never enter this repository.
 codex-project-memory/
 memory.sqlite3*
+usage.sqlite3*
 master.key
 registry.json
 backups/

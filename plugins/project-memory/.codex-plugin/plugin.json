@@ -1,7 +1,7 @@
 {
   "name": "project-memory",
-  "version": "0.2.0+codex.20260807113006",
-  "description": "Local, hierarchical project-scoped operational memory for recurring actions and verified solutions.",
+  "version": "0.3.0+codex.20260807162640",
+  "description": "Local hierarchical project memory with private usage and error diagnostics.",
   "author": {
     "name": "woffko",
     "url": "https://github.com/woffko"
@@ -20,7 +20,7 @@
   "interface": {
     "displayName": "Project Memory",
     "shortDescription": "Remember verified project and subproject procedures locally.",
-    "longDescription": "Routes recurring actions, verified solutions, test-only asset access details, and log locations through hierarchical project keys into local databases outside Git.",
+    "longDescription": "Routes recurring actions and verified solutions through hierarchical project keys, with local-only usage aggregates, sanitized error diagnostics, and a read-only report tool.",
     "developerName": "woffko",
     "category": "Productivity",
     "capabilities": [
@@ -31,6 +31,7 @@
       "Search project memory before troubleshooting.",
       "Route this task to its mapped subproject and shared parent memory.",
       "Record this repeated action and verified outcome.",
+      "Show local project-memory usage or sanitized errors.",
       "Show known test assets and log locations."
     ]
   },
