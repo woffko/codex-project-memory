@@ -57,10 +57,61 @@ Change to the root of the project that should receive its own memory:
 
 ```bash
 cd /path/to/project
+~/.local/share/codex-project-memory/runtime/bin/codex-project-memory enroll
+```
+
+`--project-root` defaults to the current directory. `--project-name` and the
+stable project key both default to its folder name, while either can be
+overridden independently. Interactive terminals show the resolved root, name,
+and key before enrollment; pass `--yes` to skip confirmation. Explicit values
+remain available:
+
+```bash
 ~/.local/share/codex-project-memory/runtime/bin/codex-project-memory enroll \
   --project-root "$PWD" \
-  --project-name "my-project"
+  --project-name "My Project" \
+  --project-key "my-project" \
+  --yes
 ```
+
+The project key is the stable selector used in MCP calls. It is not a password
+or security token. The canonical enrolled root remains the storage identity
+and the containment boundary used when attaching subprojects.
+
+### Enroll related subprojects
+
+An ordinary project automatically becomes a meta-project when its first child
+is enrolled. Its existing database becomes shared parent memory without being
+moved or rewritten. From an enrolled parent root:
+
+```bash
+cd /path/to/OpenMeta
+
+~/.local/share/codex-project-memory/runtime/bin/codex-project-memory enroll \
+  --subproject OpenMeta
+
+~/.local/share/codex-project-memory/runtime/bin/codex-project-memory enroll \
+  --subproject OpenMeta-c
+
+~/.local/share/codex-project-memory/runtime/bin/codex-project-memory enroll \
+  --subproject OpenMeta-rc
+```
+
+This derives the hierarchical keys `OpenMeta/OpenMeta`,
+`OpenMeta/OpenMeta-c`, and `OpenMeta/OpenMeta-rc`. Use `--project-name` for a
+friendlier display name and `--project-key` when a different stable selector
+is preferable. The equivalent form from a child directory is:
+
+```bash
+cd /path/to/OpenMeta/OpenMeta-c
+~/.local/share/codex-project-memory/runtime/bin/codex-project-memory enroll \
+  --parent-root ..
+```
+
+Subprojects must be inside their enrolled parent root. Parent status reports
+its children and `is_meta_project: true`; child status reports its
+`parent_project`. Searches remain exact: AGENTS directs Codex to search the
+active child and its parent separately.
 
 A normal enrollment does not allow credential storage. Enable that capability
 separately only when the project works with resources explicitly classified as
@@ -68,8 +119,6 @@ test-only:
 
 ```bash
 ~/.local/share/codex-project-memory/runtime/bin/codex-project-memory enroll \
-  --project-root "$PWD" \
-  --project-name "my-project" \
   --allow-test-secrets
 ```
 
@@ -85,12 +134,14 @@ project's `.codex/config.toml`. They keep reads and ordinary memory writes
 automatic, while requiring approval to store or reveal test-only credentials
 and to deprecate a record.
 
-Add the guidance from [`examples/AGENTS.md`](examples/AGENTS.md) to the
-project's `AGENTS.md`. The plugin already bundles the same workflow as a skill,
-but project guidance makes the intended behavior explicit and durable.
+Add and customize the routing guidance from
+[`examples/AGENTS.md`](examples/AGENTS.md) in the workspace's `AGENTS.md`. It
+maps repository paths to hierarchical project keys and tells Codex when to use
+shared parent memory. The plugin bundles the same workflow as a skill, while
+project guidance supplies the exact local mapping.
 
 After installation or configuration changes, start a new Codex session from
-the enrolled project root:
+the enrolled project or common meta-project root:
 
 ```bash
 codex -C /path/to/project
@@ -115,11 +166,15 @@ Untested hypotheses and raw logs should never become final solutions.
 
 ## MCP tools
 
+Pass the hierarchical `project` key from `AGENTS.md` on every new tool call.
+Legacy `project_root` arguments remain supported for existing configurations.
+Project keys select memory but are not authentication credentials.
+
 | Tool | Purpose |
 | --- | --- |
-| `project_memory_status` | Confirm enrollment and show record counts |
-| `project_memory_search` | Search solutions and metadata without secrets |
-| `project_memory_get` | Read a normal record |
+| `project_memory_status` | Confirm enrollment and show counts plus parent/child routing |
+| `project_memory_search` | Search one selected project's records without secrets |
+| `project_memory_get` | Read a normal record from one selected project |
 | `project_memory_note_repetition` | Record another occurrence of a problem/action |
 | `project_memory_finalize_solution` | Save the verified final variant |
 | `project_memory_record_log_location` | Remember a stable log location |
@@ -137,7 +192,7 @@ codex mcp add project_memory -- \
   ~/.local/share/codex-project-memory/runtime/bin/codex-project-memory serve
 ```
 
-The project must still be registered with the `enroll` command.
+Projects and subprojects must still be registered with the `enroll` command.
 
 ## Storage and backups
 
@@ -159,8 +214,18 @@ Create a consistent SQLite backup:
 
 ```bash
 ~/.local/share/codex-project-memory/runtime/bin/codex-project-memory backup \
-  --project-root /path/to/project
+  --project OpenMeta/OpenMeta-c
 ```
+
+`backup --project-root /path/to/project` remains available for legacy scripts.
+
+### Registry migration
+
+Registry schema 1 entries are upgraded to schema 2 when read and persisted on
+the next enrollment. Existing project IDs, SQLite directories, encrypted
+records, and backups are preserved. Existing projects receive a project key
+from their stored project name; duplicate legacy names receive a stable hash
+suffix and should be added to the workspace's AGENTS routing explicitly.
 
 Never copy `master.key` into a repository. Restoring encrypted test fields
 requires both the database and its corresponding key.
@@ -193,8 +258,9 @@ python3 plugins/project-memory/scripts/test_project_memory.py
 python3 /path/to/plugin-creator/scripts/validate_plugin.py plugins/project-memory
 ```
 
-The tests cover the minimum occurrence count, verified finalization, project
-isolation, rejection of credentials in normal records, XDG storage paths, and
+The tests cover hierarchical project routing, legacy registry migration,
+stable encrypted-record identity, minimum occurrence counts, verified
+finalization, project isolation, credential rejection, XDG storage paths, and
 the absence of plaintext test credentials in SQLite.
 
 ## Uninstall

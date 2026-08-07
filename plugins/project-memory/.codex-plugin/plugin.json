@@ -1,7 +1,7 @@
 {
   "name": "project-memory",
-  "version": "0.1.0",
-  "description": "Local, project-scoped operational memory for recurring actions and verified solutions.",
+  "version": "0.2.0+codex.20260807113006",
+  "description": "Local, hierarchical project-scoped operational memory for recurring actions and verified solutions.",
   "author": {
     "name": "woffko",
     "url": "https://github.com/woffko"
@@ -9,17 +9,27 @@
   "homepage": "https://github.com/woffko/codex-project-memory#readme",
   "repository": "https://github.com/woffko/codex-project-memory",
   "license": "MIT",
-  "keywords": ["codex", "mcp", "memory", "knowledge-base", "sqlite"],
+  "keywords": [
+    "codex",
+    "mcp",
+    "memory",
+    "knowledge-base",
+    "sqlite"
+  ],
   "skills": "./skills/",
   "interface": {
     "displayName": "Project Memory",
-    "shortDescription": "Remember verified project procedures locally.",
-    "longDescription": "Stores recurring actions, verified solutions, test-only asset access details, and log locations in a project-scoped local database outside Git.",
+    "shortDescription": "Remember verified project and subproject procedures locally.",
+    "longDescription": "Routes recurring actions, verified solutions, test-only asset access details, and log locations through hierarchical project keys into local databases outside Git.",
     "developerName": "woffko",
     "category": "Productivity",
-    "capabilities": ["Read", "Write"],
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
     "defaultPrompt": [
       "Search project memory before troubleshooting.",
+      "Route this task to its mapped subproject and shared parent memory.",
       "Record this repeated action and verified outcome.",
       "Show known test assets and log locations."
     ]

@@ -26,7 +26,9 @@ codex plugin add project-memory@codex-project-memory
 
 echo
 echo "Project Memory installed. Enroll a project from its root with:"
-echo "  $runtime_root/bin/codex-project-memory enroll --project-root \"\$PWD\" --project-name NAME"
+echo "  $runtime_root/bin/codex-project-memory enroll"
+echo "Add a child from an enrolled parent with:"
+echo "  $runtime_root/bin/codex-project-memory enroll --subproject RELATIVE-PATH"
 echo
 echo "Add --allow-test-secrets only for projects that may store credentials for explicitly test-only assets."
 echo "Start a new Codex thread after enrollment."

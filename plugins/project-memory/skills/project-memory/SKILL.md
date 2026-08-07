@@ -1,23 +1,44 @@
 ---
 name: project-memory
-description: Use local project-scoped MCP memory when troubleshooting, repeating operational actions, working with enrolled test equipment, or locating project logs. Search before repeating work; track recurring attempts; save only a verified final solution.
+description: Use local project-scoped MCP memory when troubleshooting, repeating operational actions, working with enrolled test equipment, or locating project logs. Route meta-project work through the hierarchical project keys declared in AGENTS, search before repeating work, and save only a verified final solution.
 ---
 
 # Project Memory workflow
 
-Use the `project_memory` MCP tools only for the current enrolled project. Pass
-the canonical current project root as `project_root` on every call. Do not use a
-different checkout merely because it has the same repository name.
+Use the `project_memory` MCP tools only with a project key explicitly mapped by
+the current workspace's `AGENTS.md`. Pass that key as `project` on every call.
+`project_root` remains available only for legacy configurations.
+
+A project may have enrolled child projects. The parent holds shared memory; a
+child holds implementation-specific memory. The parent role is derived from
+its children, so an ordinary project becomes a meta-project automatically when
+its first child is enrolled.
+
+## Select the project
+
+1. Determine the active project from the task and repository-path mapping in
+   `AGENTS.md`.
+2. Call `project_memory_status` for that exact project key.
+3. If status names a `parent_project`, call status and search for that parent
+   separately when the task may use shared procedures, test equipment, or
+   infrastructure.
+4. Do not use a sibling project's memory unless the task explicitly spans
+   that sibling or the user asks for it.
+5. If the task does not map unambiguously to a project key, ask before writing
+   memory. Do not guess a key from a similar repository name.
 
 ## Before troubleshooting or repeating an operational action
 
-1. Call `project_memory_status` to confirm the project is enrolled.
-2. Call `project_memory_search` using the task, error signature, device name,
-   command, or log purpose.
-3. Reuse a stored solution only when its context and verification still match.
+1. Search the active project using the task, error signature, command, device
+   name, or log purpose.
+2. Search the declared parent project separately for relevant shared memory.
+3. Reuse a stored solution only when its project, context, and verification
+   still match.
 
 ## Repetitions and final solutions
 
+- Write component-specific candidates and solutions to the active child
+  project. Write genuinely shared procedures to the parent project explicitly.
 - Call `project_memory_note_repetition` when substantially the same problem or
   operational action recurs while an effective final variant is still being
   sought.
@@ -35,6 +56,8 @@ different checkout merely because it has the same repository name.
 - The user authorizes this memory to retain routes, addresses, usernames,
   credentials, access methods, and log locations for equipment explicitly
   identified as test-only in an enrolled project.
+- Prefer the declared parent project for equipment shared by multiple child
+  projects.
 - Store credentials only through `project_memory_store_test_asset`, with
   `test_only: true`, placing passwords, tokens, and keys inside `secret_fields`.
 - Keep non-secret routing and location data in `endpoint`, `paths`, and `notes`.
@@ -50,5 +73,5 @@ different checkout merely because it has the same repository name.
   fields.
 - Deprecate stale records instead of deleting them. Record why the old solution
   is no longer valid.
-- If the MCP server is unavailable, say so; do not claim that memory was
-  searched or updated.
+- If the MCP server or mapped project is unavailable, say so; do not claim that
+  memory was searched or updated.

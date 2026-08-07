@@ -12,6 +12,24 @@ not send stored records anywhere by itself.
   and the key use mode `0600` on POSIX systems.
 - Only canonical project roots explicitly enrolled in the registry are
   accepted. Same-named checkouts do not automatically share a database.
+- Hierarchical project keys are selectors, not passwords. Keys are unique
+  case-insensitively, map to canonical enrolled roots, and do not replace root
+  validation.
+- A subproject must be physically contained by its enrolled parent root.
+  Parent/meta-project status is derived from registered child relationships;
+  adding a child does not move or rewrite the parent's existing database.
+
+## Project routing boundary
+
+The workspace's `AGENTS.md` maps repository paths to enrolled project keys and
+prevents accidental cross-project memory use. That instruction is a workflow
+boundary, not an authorization mechanism. A process running as the same OS
+account and connected to the MCP server can request another known enrolled
+project key. Use separate OS accounts or separate `PROJECT_MEMORY_HOME`
+instances when projects require a hard access boundary from each other.
+
+Child sessions should search their selected child memory and declared parent
+memory separately. Sibling memory is not implicitly searched or exposed.
 
 ## Secrets
 

@@ -22,8 +22,9 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
 SERVER_NAME = "Project Memory"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.2.0"
 PROTOCOL_VERSION = "2025-11-25"
+REGISTRY_SCHEMA_VERSION = 2
 SECRET_PATTERNS = (
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----", re.I),
     re.compile(r"\b(?:password|passwd|pwd|token|api[_-]?key|secret)\s*[:=]\s*[^\s,;]+", re.I),
@@ -41,6 +42,18 @@ def utc_now() -> str:
 
 def canonical(path: str | Path) -> str:
     return str(Path(path).expanduser().resolve(strict=True))
+
+
+def normalize_project_key(value: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise MemoryError("project key must be a non-empty string")
+    value = value.strip().replace("\\", "/")
+    if len(value) > 1000:
+        raise MemoryError("project key exceeds 1000 characters")
+    parts = [part.strip() for part in value.split("/")]
+    if any(not part or part in {".", ".."} for part in parts):
+        raise MemoryError("project key must contain non-empty path-like components")
+    return "/".join(parts)
 
 
 def compact_json(value: Any) -> str:
@@ -107,15 +120,49 @@ class ProjectMemory:
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         path.chmod(0o700)
 
+    def _upgrade_registry(self, registry: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(registry, dict) or not isinstance(registry.get("projects", {}), dict):
+            raise MemoryError("invalid project-memory registry")
+        try:
+            version = int(registry.get("schema_version", 1))
+        except (TypeError, ValueError) as exc:
+            raise MemoryError("invalid project-memory registry schema version") from exc
+        if version > REGISTRY_SCHEMA_VERSION:
+            raise MemoryError(f"registry schema {version} is newer than supported schema {REGISTRY_SCHEMA_VERSION}")
+        projects = registry.setdefault("projects", {})
+        used_keys: set[str] = set()
+        for root in sorted(projects):
+            entry = projects[root]
+            if not isinstance(entry, dict):
+                raise MemoryError(f"invalid registry entry for project root: {root}")
+            candidate = entry.get("project_key") or entry.get("project_name") or Path(root).name or "project"
+            try:
+                candidate = normalize_project_key(candidate)
+            except MemoryError:
+                candidate = f"project-{hashlib.sha256(root.encode()).hexdigest()[:8]}"
+            if candidate.casefold() in used_keys:
+                suffix = hashlib.sha256(root.encode()).hexdigest()
+                length = 8
+                candidate_base = candidate
+                while candidate.casefold() in used_keys:
+                    candidate = f"{candidate_base}@{suffix[:length]}"
+                    length += 1
+            used_keys.add(candidate.casefold())
+            entry["project_key"] = candidate
+            entry.setdefault("parent_project_id", None)
+        registry["schema_version"] = REGISTRY_SCHEMA_VERSION
+        return registry
+
     def _load_registry(self) -> dict[str, Any]:
         if not self.registry_path.exists():
-            return {"schema_version": 1, "projects": {}}
+            return {"schema_version": REGISTRY_SCHEMA_VERSION, "projects": {}}
         try:
-            return json.loads(self.registry_path.read_text(encoding="utf-8"))
+            return self._upgrade_registry(json.loads(self.registry_path.read_text(encoding="utf-8")))
         except (OSError, json.JSONDecodeError) as exc:
             raise MemoryError(f"cannot read registry: {exc}") from exc
 
     def _save_registry(self, registry: dict[str, Any]) -> None:
+        registry = self._upgrade_registry(registry)
         self._secure_dir(self.data_home)
         temporary = self.registry_path.with_suffix(".tmp")
         temporary.write_text(json.dumps(registry, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -123,10 +170,106 @@ class ProjectMemory:
         temporary.replace(self.registry_path)
         self.registry_path.chmod(0o600)
 
-    def enroll(self, project_root: str, project_name: str, allow_test_secrets: bool) -> dict[str, Any]:
-        root = canonical(project_root)
-        if not Path(root).is_dir():
-            raise MemoryError("project root must be a directory")
+    def _entry_by_id(self, registry: dict[str, Any], project_id: str | None) -> dict[str, Any] | None:
+        if not project_id:
+            return None
+        return next((entry for entry in registry["projects"].values() if entry.get("project_id") == project_id), None)
+
+    def _entry_by_key(self, registry: dict[str, Any], project_key: str) -> dict[str, Any] | None:
+        folded = normalize_project_key(project_key).casefold()
+        return next((entry for entry in registry["projects"].values() if entry["project_key"].casefold() == folded), None)
+
+    def _describe_entry(self, registry: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
+        parent = self._entry_by_id(registry, entry.get("parent_project_id"))
+        children = sorted(
+            child["project_key"]
+            for child in registry["projects"].values()
+            if child.get("parent_project_id") == entry["project_id"]
+        )
+        return {
+            **entry,
+            "parent_project": parent["project_key"] if parent else None,
+            "children": children,
+            "is_meta_project": bool(children),
+        }
+
+    def _resolve_root_in_registry(self, registry: dict[str, Any], project_root: str) -> dict[str, Any]:
+        try:
+            root = canonical(project_root)
+        except (OSError, RuntimeError) as exc:
+            raise MemoryError(f"invalid project root: {exc}") from exc
+        entry = registry["projects"].get(root)
+        if not entry:
+            raise MemoryError(f"project is not enrolled: {root}")
+        if entry.get("project_root") != root:
+            raise MemoryError("registry project-root mismatch")
+        return entry
+
+    def _prepare_enrollment(
+        self,
+        project_root: str,
+        project_name: str | None,
+        allow_test_secrets: bool | None,
+        parent_root: str | None,
+        project_key: str | None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        try:
+            root = canonical(project_root)
+        except (OSError, RuntimeError) as exc:
+            raise MemoryError(f"invalid project root: {exc}") from exc
+        registry = self._load_registry()
+        existing = registry["projects"].get(root)
+        parent = None
+        parent_project_id = existing.get("parent_project_id") if existing else None
+        if parent_root is not None:
+            parent = self._resolve_root_in_registry(registry, parent_root)
+            parent_path = Path(parent["project_root"])
+            try:
+                relative = Path(root).relative_to(parent_path)
+            except ValueError as exc:
+                raise MemoryError("subproject root must be inside its parent project root") from exc
+            if not relative.parts:
+                raise MemoryError("a project cannot be its own parent")
+            parent_project_id = parent["project_id"]
+        elif parent_project_id:
+            parent = self._entry_by_id(registry, parent_project_id)
+            if not parent:
+                raise MemoryError("enrolled project references an unknown parent project")
+
+        if project_name is None:
+            name = existing.get("project_name") if existing else Path(root).name
+        elif isinstance(project_name, str) and project_name.strip():
+            name = project_name.strip()
+        else:
+            raise MemoryError("project name must be a non-empty string")
+        name = name or "project"
+        default_key_segment = Path(root).name or "project"
+
+        if project_key is not None:
+            key = normalize_project_key(project_key)
+        elif parent_root is not None and parent:
+            key = normalize_project_key(f"{parent['project_key']}/{default_key_segment}")
+        elif existing:
+            key = existing["project_key"]
+        else:
+            key = normalize_project_key(default_key_segment)
+        if parent:
+            parent_prefix = f"{parent['project_key']}/"
+            if not key.casefold().startswith(parent_prefix.casefold()):
+                raise MemoryError(f"subproject key must be below parent key '{parent['project_key']}'")
+        conflicting = self._entry_by_key(registry, key)
+        if conflicting and conflicting.get("project_root") != root:
+            raise MemoryError(f"project key is already enrolled: {key}")
+        if existing and key.casefold() != existing["project_key"].casefold():
+            has_children = any(
+                child.get("parent_project_id") == existing["project_id"]
+                for child in registry["projects"].values()
+            )
+            if parent_root is None:
+                raise MemoryError("project key is stable; supply a parent only when attaching an existing standalone project")
+            if has_children:
+                raise MemoryError("a project with subprojects cannot be attached beneath another parent")
+
         remote = ""
         try:
             remote = subprocess.run(
@@ -139,39 +282,75 @@ class ProjectMemory:
         except (OSError, subprocess.SubprocessError):
             pass
         identity = f"{remote}\n{root}" if remote else root
-        slug = re.sub(r"[^a-z0-9]+", "-", project_name.casefold()).strip("-") or "project"
-        project_id = f"{slug}-{hashlib.sha256(identity.encode()).hexdigest()[:12]}"
-        registry = self._load_registry()
-        existing = registry["projects"].get(root)
-        if existing and existing["project_id"] != project_id:
-            raise MemoryError("project root is already enrolled under a different identity")
+        slug = re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-") or "project"
+        project_id = existing["project_id"] if existing else f"{slug}-{hashlib.sha256(identity.encode()).hexdigest()[:12]}"
         entry = {
             "project_id": project_id,
-            "project_name": project_name,
+            "project_key": key,
+            "project_name": name,
             "project_root": root,
             "git_remote": remote,
-            "allow_test_secrets": bool(allow_test_secrets),
+            "parent_project_id": parent_project_id,
+            "allow_test_secrets": (existing or {}).get("allow_test_secrets", False) if allow_test_secrets is None else bool(allow_test_secrets),
             "enrolled_at": existing.get("enrolled_at", utc_now()) if existing else utc_now(),
         }
         registry["projects"][root] = entry
+        return registry, entry
+
+    def preview_enrollment(
+        self,
+        project_root: str,
+        project_name: str | None = None,
+        allow_test_secrets: bool | None = None,
+        parent_root: str | None = None,
+        project_key: str | None = None,
+    ) -> dict[str, Any]:
+        registry, entry = self._prepare_enrollment(
+            project_root, project_name, allow_test_secrets, parent_root, project_key
+        )
+        return self._describe_entry(registry, entry)
+
+    def enroll(
+        self,
+        project_root: str,
+        project_name: str | None = None,
+        allow_test_secrets: bool | None = None,
+        parent_root: str | None = None,
+        project_key: str | None = None,
+    ) -> dict[str, Any]:
+        registry, entry = self._prepare_enrollment(
+            project_root, project_name, allow_test_secrets, parent_root, project_key
+        )
         self._save_registry(registry)
-        project_dir = self.data_home / "projects" / project_id
+        project_dir = self.data_home / "projects" / entry["project_id"]
         self._secure_dir(project_dir)
         connection = self._connect(entry)
         connection.close()
-        return entry
+        return self._describe_entry(registry, entry)
 
     def resolve_project(self, project_root: str) -> dict[str, Any]:
-        try:
-            root = canonical(project_root)
-        except (OSError, RuntimeError) as exc:
-            raise MemoryError(f"invalid project root: {exc}") from exc
-        entry = self._load_registry().get("projects", {}).get(root)
+        return self._resolve_root_in_registry(self._load_registry(), project_root)
+
+    def resolve_project_key(self, project_key: str) -> dict[str, Any]:
+        registry = self._load_registry()
+        entry = self._entry_by_key(registry, project_key)
         if not entry:
-            raise MemoryError(f"project is not enrolled: {root}")
-        if entry.get("project_root") != root:
-            raise MemoryError("registry project-root mismatch")
+            raise MemoryError(f"project key is not enrolled: {normalize_project_key(project_key)}")
         return entry
+
+    def resolve_project_args(self, args: dict[str, Any]) -> dict[str, Any]:
+        project = args.get("project")
+        project_root = args.get("project_root")
+        if project is not None:
+            entry = self.resolve_project_key(require_text(args, "project", 1000))
+            if project_root is not None:
+                root_entry = self.resolve_project(require_text(args, "project_root", 4096))
+                if root_entry["project_id"] != entry["project_id"]:
+                    raise MemoryError("project and project_root identify different enrolled projects")
+            return entry
+        if project_root is not None:
+            return self.resolve_project(require_text(args, "project_root", 4096))
+        raise MemoryError("project or project_root is required")
 
     def _db_path(self, entry: dict[str, Any]) -> Path:
         return self.data_home / "projects" / entry["project_id"] / "memory.sqlite3"
@@ -301,7 +480,9 @@ class ProjectMemory:
         return result
 
     def status(self, args: dict[str, Any]) -> dict[str, Any]:
-        entry = self.resolve_project(require_text(args, "project_root", 4096))
+        entry = self.resolve_project_args(args)
+        registry = self._load_registry()
+        described = self._describe_entry(registry, entry)
         connection = self._connect(entry)
         counts = {row["kind"]: row["count"] for row in connection.execute(
             "SELECT kind, count(*) AS count FROM records WHERE status='active' GROUP BY kind"
@@ -310,7 +491,12 @@ class ProjectMemory:
         return {
             "enrolled": True,
             "project_id": entry["project_id"],
+            "project": entry["project_key"],
             "project_name": entry["project_name"],
+            "project_root": entry["project_root"],
+            "parent_project": described["parent_project"],
+            "children": described["children"],
+            "is_meta_project": described["is_meta_project"],
             "allow_test_secrets": entry["allow_test_secrets"],
             "counts": counts,
             "storage": str(self._db_path(entry)),
@@ -318,7 +504,7 @@ class ProjectMemory:
         }
 
     def search(self, args: dict[str, Any]) -> dict[str, Any]:
-        entry = self.resolve_project(require_text(args, "project_root", 4096))
+        entry = self.resolve_project_args(args)
         query = require_text(args, "query", 1000)
         limit = int(args.get("limit", 10))
         if limit < 1 or limit > 50:
@@ -335,10 +521,10 @@ class ProjectMemory:
             (fts_query, limit),
         ).fetchall()
         connection.close()
-        return {"query": query, "results": [self._public_record(row) for row in rows]}
+        return {"project": entry["project_key"], "query": query, "results": [self._public_record(row) for row in rows]}
 
     def get(self, args: dict[str, Any], include_test_secrets: bool = False) -> dict[str, Any]:
-        entry = self.resolve_project(require_text(args, "project_root", 4096))
+        entry = self.resolve_project_args(args)
         record_id = require_text(args, "record_id", 100)
         connection = self._connect(entry)
         row = connection.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone()
@@ -357,10 +543,11 @@ class ProjectMemory:
             self._audit(connection, "reveal_test_asset", record_id, {"approved_scope": "test_only"})
             connection.commit()
         connection.close()
+        result["project"] = entry["project_key"]
         return result
 
     def note_repetition(self, args: dict[str, Any]) -> dict[str, Any]:
-        entry = self.resolve_project(require_text(args, "project_root", 4096))
+        entry = self.resolve_project_args(args)
         problem = require_text(args, "problem")
         action = require_text(args, "action")
         context = str(args.get("context", "")).strip()
@@ -407,11 +594,12 @@ class ProjectMemory:
         connection.commit()
         result = self._public_record(connection.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone())
         connection.close()
+        result["project"] = entry["project_key"]
         result["eligible_to_finalize"] = result["repetition_count"] >= 2
         return result
 
     def finalize_solution(self, args: dict[str, Any]) -> dict[str, Any]:
-        entry = self.resolve_project(require_text(args, "project_root", 4096))
+        entry = self.resolve_project_args(args)
         record_id = require_text(args, "candidate_id", 100)
         title = require_text(args, "title", 500)
         final_steps = string_list(args.get("final_steps"), "final_steps", 100)
@@ -453,10 +641,11 @@ class ProjectMemory:
         connection.commit()
         result = self._public_record(connection.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone())
         connection.close()
+        result["project"] = entry["project_key"]
         return result
 
     def store_test_asset(self, args: dict[str, Any]) -> dict[str, Any]:
-        entry = self.resolve_project(require_text(args, "project_root", 4096))
+        entry = self.resolve_project_args(args)
         if args.get("test_only") is not True:
             raise MemoryError("test_only must be explicitly true")
         if not entry.get("allow_test_secrets"):
@@ -491,10 +680,11 @@ class ProjectMemory:
         connection.commit()
         result = self._public_record(connection.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone())
         connection.close()
+        result["project"] = entry["project_key"]
         return result
 
     def record_log_location(self, args: dict[str, Any]) -> dict[str, Any]:
-        entry = self.resolve_project(require_text(args, "project_root", 4096))
+        entry = self.resolve_project_args(args)
         name = require_text(args, "name", 500)
         path = require_text(args, "path", 4096)
         purpose = require_text(args, "purpose")
@@ -519,10 +709,11 @@ class ProjectMemory:
         connection.commit()
         result = self._public_record(connection.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone())
         connection.close()
+        result["project"] = entry["project_key"]
         return result
 
     def deprecate(self, args: dict[str, Any]) -> dict[str, Any]:
-        entry = self.resolve_project(require_text(args, "project_root", 4096))
+        entry = self.resolve_project_args(args)
         record_id = require_text(args, "record_id", 100)
         reason = require_text(args, "reason")
         if find_sensitive(reason):
@@ -545,10 +736,16 @@ class ProjectMemory:
         connection.commit()
         result = self._public_record(connection.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone())
         connection.close()
+        result["project"] = entry["project_key"]
         return result
 
-    def backup(self, project_root: str) -> Path:
-        entry = self.resolve_project(project_root)
+    def backup(self, project_root: str | None = None, project: str | None = None) -> Path:
+        selector: dict[str, Any] = {}
+        if project is not None:
+            selector["project"] = project
+        if project_root is not None:
+            selector["project_root"] = project_root
+        entry = self.resolve_project_args(selector)
         source = self._db_path(entry)
         backup_dir = source.parent / "backups"
         self._secure_dir(backup_dir)
@@ -563,16 +760,146 @@ class ProjectMemory:
         return destination
 
 
+PROJECT_SELECTOR_PROPERTIES: dict[str, Any] = {
+    "project": {
+        "type": "string",
+        "description": "Hierarchical project key from the current workspace AGENTS mapping, for example OpenMeta/OpenMeta-c.",
+    },
+    "project_root": {
+        "type": "string",
+        "description": "Legacy exact enrolled project root. Prefer project for new configurations.",
+    },
+}
+
+
+def tool_input(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {**PROJECT_SELECTOR_PROPERTIES, **properties},
+        "required": required,
+        "anyOf": [{"required": ["project"]}, {"required": ["project_root"]}],
+    }
+
+
 TOOLS: list[dict[str, Any]] = [
-    {"name": "project_memory_status", "title": "Project Memory Status", "description": "Confirm that the exact project root is enrolled and show local record counts.", "inputSchema": {"type": "object", "properties": {"project_root": {"type": "string"}}, "required": ["project_root"]}, "annotations": {"readOnlyHint": True, "destructiveHint": False}},
-    {"name": "project_memory_search", "title": "Search Project Memory", "description": "Search non-secret project memory before repeating troubleshooting or operational work.", "inputSchema": {"type": "object", "properties": {"project_root": {"type": "string"}, "query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10}}, "required": ["project_root", "query"]}, "annotations": {"readOnlyHint": True, "destructiveHint": False}},
-    {"name": "project_memory_get", "title": "Get Project Memory Record", "description": "Read an ordinary record or test-asset metadata without revealing encrypted credentials.", "inputSchema": {"type": "object", "properties": {"project_root": {"type": "string"}, "record_id": {"type": "string"}}, "required": ["project_root", "record_id"]}, "annotations": {"readOnlyHint": True, "destructiveHint": False}},
-    {"name": "project_memory_get_test_asset", "title": "Reveal Test Asset Credentials", "description": "Decrypt credentials for an explicitly test-only asset in an enrolled project. Use only when required by the current task and never reproduce secrets elsewhere.", "inputSchema": {"type": "object", "properties": {"project_root": {"type": "string"}, "record_id": {"type": "string"}}, "required": ["project_root", "record_id"]}, "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}},
-    {"name": "project_memory_note_repetition", "title": "Note Repeated Action", "description": "Track another occurrence of a recurring problem/action while a final variant is being sought. Credential-like values are rejected.", "inputSchema": {"type": "object", "properties": {"project_root": {"type": "string"}, "problem": {"type": "string"}, "action": {"type": "string"}, "context": {"type": "string"}, "observation": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}}, "required": ["project_root", "problem", "action"]}, "annotations": {"readOnlyHint": False, "destructiveHint": False}},
-    {"name": "project_memory_finalize_solution", "title": "Finalize Verified Solution", "description": "Convert a candidate with at least two occurrences into a solution after real verification succeeded.", "inputSchema": {"type": "object", "properties": {"project_root": {"type": "string"}, "candidate_id": {"type": "string"}, "title": {"type": "string"}, "final_steps": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "verification": {"type": "string"}, "outcome": {"type": "string"}, "context": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}}, "required": ["project_root", "candidate_id", "title", "final_steps", "verification", "outcome"]}, "annotations": {"readOnlyHint": False, "destructiveHint": False}},
-    {"name": "project_memory_store_test_asset", "title": "Store Test Equipment", "description": "Store test-only equipment routing, paths, username, and encrypted credentials. Requires an enrolled project that explicitly allows test secrets.", "inputSchema": {"type": "object", "properties": {"project_root": {"type": "string"}, "test_only": {"type": "boolean", "const": True}, "name": {"type": "string"}, "asset_type": {"type": "string"}, "endpoint": {"type": "string"}, "username": {"type": "string"}, "secret_fields": {"type": "object", "additionalProperties": {"type": ["string", "number", "boolean"]}}, "paths": {"type": "object", "additionalProperties": {"type": "string"}}, "notes": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}}, "required": ["project_root", "test_only", "name", "asset_type", "secret_fields"]}, "annotations": {"readOnlyHint": False, "destructiveHint": False}},
-    {"name": "project_memory_record_log_location", "title": "Record Log Location", "description": "Record a stable local or test-device log path without copying raw logs or credentials.", "inputSchema": {"type": "object", "properties": {"project_root": {"type": "string"}, "name": {"type": "string"}, "path": {"type": "string"}, "purpose": {"type": "string"}, "device": {"type": "string"}, "notes": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}}, "required": ["project_root", "name", "path", "purpose"]}, "annotations": {"readOnlyHint": False, "destructiveHint": False}},
-    {"name": "project_memory_deprecate", "title": "Deprecate Project Memory Record", "description": "Soft-deprecate an obsolete record while preserving revisions and audit history.", "inputSchema": {"type": "object", "properties": {"project_root": {"type": "string"}, "record_id": {"type": "string"}, "reason": {"type": "string"}}, "required": ["project_root", "record_id", "reason"]}, "annotations": {"readOnlyHint": False, "destructiveHint": True}},
+    {
+        "name": "project_memory_status",
+        "title": "Project Memory Status",
+        "description": "Confirm enrollment and show counts plus parent/child project routing for one project key.",
+        "inputSchema": tool_input({}, []),
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+    },
+    {
+        "name": "project_memory_search",
+        "title": "Search Project Memory",
+        "description": "Search one selected project's non-secret memory. Search its parent separately when AGENTS directs it.",
+        "inputSchema": tool_input(
+            {
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+            },
+            ["query"],
+        ),
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+    },
+    {
+        "name": "project_memory_get",
+        "title": "Get Project Memory Record",
+        "description": "Read an ordinary record or test-asset metadata from one selected project without revealing encrypted credentials.",
+        "inputSchema": tool_input({"record_id": {"type": "string"}}, ["record_id"]),
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+    },
+    {
+        "name": "project_memory_get_test_asset",
+        "title": "Reveal Test Asset Credentials",
+        "description": "Decrypt credentials for an explicitly test-only asset in one selected project. Never reproduce secrets elsewhere.",
+        "inputSchema": tool_input({"record_id": {"type": "string"}}, ["record_id"]),
+        "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
+    },
+    {
+        "name": "project_memory_note_repetition",
+        "title": "Note Repeated Action",
+        "description": "Track another occurrence in one selected project while a final variant is still being sought.",
+        "inputSchema": tool_input(
+            {
+                "problem": {"type": "string"},
+                "action": {"type": "string"},
+                "context": {"type": "string"},
+                "observation": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+            },
+            ["problem", "action"],
+        ),
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+    },
+    {
+        "name": "project_memory_finalize_solution",
+        "title": "Finalize Verified Solution",
+        "description": "Convert a candidate in one selected project into a verified solution after two occurrences.",
+        "inputSchema": tool_input(
+            {
+                "candidate_id": {"type": "string"},
+                "title": {"type": "string"},
+                "final_steps": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                "verification": {"type": "string"},
+                "outcome": {"type": "string"},
+                "context": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+            },
+            ["candidate_id", "title", "final_steps", "verification", "outcome"],
+        ),
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+    },
+    {
+        "name": "project_memory_store_test_asset",
+        "title": "Store Test Equipment",
+        "description": "Store test-only routing and encrypted credentials in one selected project that allows test secrets.",
+        "inputSchema": tool_input(
+            {
+                "test_only": {"type": "boolean", "const": True},
+                "name": {"type": "string"},
+                "asset_type": {"type": "string"},
+                "endpoint": {"type": "string"},
+                "username": {"type": "string"},
+                "secret_fields": {
+                    "type": "object",
+                    "additionalProperties": {"type": ["string", "number", "boolean"]},
+                },
+                "paths": {"type": "object", "additionalProperties": {"type": "string"}},
+                "notes": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+            },
+            ["test_only", "name", "asset_type", "secret_fields"],
+        ),
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+    },
+    {
+        "name": "project_memory_record_log_location",
+        "title": "Record Log Location",
+        "description": "Record a stable log location in one selected project without copying raw logs or credentials.",
+        "inputSchema": tool_input(
+            {
+                "name": {"type": "string"},
+                "path": {"type": "string"},
+                "purpose": {"type": "string"},
+                "device": {"type": "string"},
+                "notes": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+            },
+            ["name", "path", "purpose"],
+        ),
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+    },
+    {
+        "name": "project_memory_deprecate",
+        "title": "Deprecate Project Memory Record",
+        "description": "Soft-deprecate an obsolete record in one selected project while preserving history.",
+        "inputSchema": tool_input(
+            {"record_id": {"type": "string"}, "reason": {"type": "string"}},
+            ["record_id", "reason"],
+        ),
+        "annotations": {"readOnlyHint": False, "destructiveHint": True},
+    },
 ]
 
 
@@ -606,7 +933,7 @@ def serve() -> None:
             method = message.get("method")
             request_id = message.get("id")
             if method == "initialize":
-                send({"jsonrpc": "2.0", "id": request_id, "result": {"protocolVersion": message.get("params", {}).get("protocolVersion", PROTOCOL_VERSION), "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION}, "instructions": "Use only with the exact current enrolled project root. Search before repeated work, track recurring attempts, finalize only verified solutions, and keep test credentials inside dedicated encrypted test-asset records."}})
+                send({"jsonrpc": "2.0", "id": request_id, "result": {"protocolVersion": message.get("params", {}).get("protocolVersion", PROTOCOL_VERSION), "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION}, "instructions": "Use the hierarchical project key mapped by the current workspace AGENTS file. For subproject work, search that project and its declared parent separately. Write to the exact selected project, finalize only verified solutions, and keep test credentials inside dedicated encrypted test-asset records."}})
             elif method == "ping":
                 send({"jsonrpc": "2.0", "id": request_id, "result": {}})
             elif method == "tools/list":
@@ -630,19 +957,60 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("serve")
     enroll_parser = subparsers.add_parser("enroll")
-    enroll_parser.add_argument("--project-root", required=True)
-    enroll_parser.add_argument("--project-name", required=True)
-    enroll_parser.add_argument("--allow-test-secrets", action="store_true")
+    enroll_parser.add_argument("--project-root", help="Project root, or parent root when --subproject is used; defaults to the current directory")
+    enroll_parser.add_argument("--project-name", help="Display name; defaults to the project directory name")
+    enroll_parser.add_argument("--project-key", help="Stable hierarchical selector; defaults to the folder name under its parent key")
+    enroll_parser.add_argument("--parent-root", help="Existing enrolled parent for the project root")
+    enroll_parser.add_argument("--subproject", help="Child path relative to the parent project root")
+    enroll_parser.add_argument("--allow-test-secrets", action="store_true", default=None)
+    enroll_parser.add_argument("-y", "--yes", action="store_true", help="Skip interactive confirmation")
     backup_parser = subparsers.add_parser("backup")
-    backup_parser.add_argument("--project-root", required=True)
+    backup_selector = backup_parser.add_mutually_exclusive_group(required=True)
+    backup_selector.add_argument("--project-root")
+    backup_selector.add_argument("--project")
     args = parser.parse_args()
     memory = ProjectMemory()
     if args.command == "serve":
         serve()
     elif args.command == "enroll":
-        print(json.dumps(memory.enroll(args.project_root, args.project_name, args.allow_test_secrets), ensure_ascii=False, indent=2))
+        if args.subproject and args.parent_root:
+            parser.error("--subproject and --parent-root cannot be used together")
+        if args.subproject:
+            parent_root = args.project_root or os.getcwd()
+            child = Path(args.subproject).expanduser()
+            project_root = str(child if child.is_absolute() else Path(parent_root) / child)
+        else:
+            project_root = args.project_root or os.getcwd()
+            parent_root = args.parent_root
+        preview = memory.preview_enrollment(
+            project_root,
+            args.project_name,
+            args.allow_test_secrets,
+            parent_root,
+            args.project_key,
+        )
+        if sys.stdin.isatty() and not args.yes:
+            print("Enroll Project Memory?", file=sys.stderr)
+            print(f"  Root:    {preview['project_root']}", file=sys.stderr)
+            print(f"  Name:    {preview['project_name']}", file=sys.stderr)
+            print(f"  Project: {preview['project_key']}", file=sys.stderr)
+            if preview["parent_project"]:
+                print(f"  Parent:  {preview['parent_project']}", file=sys.stderr)
+            print("Continue? [Y/n] ", end="", file=sys.stderr, flush=True)
+            answer = sys.stdin.readline().strip().casefold()
+            if answer not in {"", "y", "yes"}:
+                print("Enrollment cancelled.", file=sys.stderr)
+                return
+        result = memory.enroll(
+            project_root,
+            args.project_name,
+            args.allow_test_secrets,
+            parent_root,
+            args.project_key,
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
     elif args.command == "backup":
-        print(memory.backup(args.project_root))
+        print(memory.backup(args.project_root, args.project))
 
 
 if __name__ == "__main__":

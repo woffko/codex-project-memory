@@ -1,4 +1,5 @@
 #!/bin/sh
+# Launch the installed Project Memory runtime.
 set -eu
 
 data_root="${PROJECT_MEMORY_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/codex-project-memory}"
