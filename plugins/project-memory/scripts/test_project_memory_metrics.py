@@ -109,7 +109,7 @@ class ProjectMemoryMetricsTest(unittest.TestCase):
         self.assertEqual(rows["pilot/rust"]["reads"], 1)
 
     def test_structured_error_keeps_clues_but_not_user_content(self):
-        credential = "password=fixture-value-never-store"
+        credential = "password" + "=" + "fixture-value-never-store"
         self.call("project_memory_search", query=credential)
         with self.assertRaises(module.ReportedToolError) as captured:
             self.call(

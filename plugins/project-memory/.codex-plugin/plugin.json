@@ -1,6 +1,6 @@
 {
   "name": "project-memory",
-  "version": "0.3.0+codex.20260807162640",
+  "version": "0.3.0+codex.20260809064743",
   "description": "Local hierarchical project memory with private usage and error diagnostics.",
   "author": {
     "name": "woffko",
@@ -30,9 +30,7 @@
     "defaultPrompt": [
       "Search project memory before troubleshooting.",
       "Route this task to its mapped subproject and shared parent memory.",
-      "Record this repeated action and verified outcome.",
-      "Show local project-memory usage or sanitized errors.",
-      "Show known test assets and log locations."
+      "Record this repeated action and verified outcome."
     ]
   },
   "mcpServers": "./.mcp.json"
