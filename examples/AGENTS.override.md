@@ -1,17 +1,19 @@
-# Project Memory
+# Local Project Memory routing
+
+This file contains machine-local routing guidance. Keep it untracked through
+the target repository's `.git/info/exclude`; do not copy these mappings into a
+portable `AGENTS.md`. Replace the neutral example paths and keys with the exact
+locally enrolled values. Do not store credentials in this file.
 
 ## Project routing
 
-Replace this example with the exact enrolled project keys and repository paths
-for this workspace.
-
-- Shared/meta-project memory: `OpenMeta`.
-- Files under `OpenMeta/` use project `OpenMeta/OpenMeta`.
-- Files under `OpenMeta-c/` use project `OpenMeta/OpenMeta-c`.
-- Files under `OpenMeta-rc/` use project `OpenMeta/OpenMeta-rc`.
-- Files and procedures shared by the whole workspace use project `OpenMeta`;
-  add an explicit child mapping for any other repository that needs separate
-  memory.
+- Shared/meta-project memory: `ExampleSuite`.
+- Files under `main/` use project `ExampleSuite/main`.
+- Files under `c-port/` use project `ExampleSuite/c-port`.
+- Files under `rust-port/` use project `ExampleSuite/rust-port`.
+- Files and procedures shared by the whole workspace use project
+  `ExampleSuite`; add an explicit child mapping for any other repository that
+  needs separate memory.
 - At task start, determine the active project from the task and target paths.
 - Search the active child project first, then search its declared parent shown
   by `project_memory_status` for shared procedures, test equipment, and

@@ -22,12 +22,18 @@ not send stored records anywhere by itself.
 
 ## Project routing boundary
 
-The workspace's `AGENTS.md` maps repository paths to enrolled project keys and
-prevents accidental cross-project memory use. That instruction is a workflow
-boundary, not an authorization mechanism. A process running as the same OS
-account and connected to the MCP server can request another known enrolled
-project key. Use separate OS accounts or separate `PROJECT_MEMORY_HOME`
-instances when projects require a hard access boundary from each other.
+An ignored, machine-local `AGENTS.override.md` maps repository paths to
+enrolled project keys and helps prevent accidental cross-project memory use.
+Do not commit that mapping or copy it into the repository's portable
+`AGENTS.md`. The override is a workflow boundary, not an authorization
+mechanism. A process running as the same OS account and connected to the MCP
+server can request another known enrolled project key. Use separate OS
+accounts or separate `PROJECT_MEMORY_HOME` instances when projects require a
+hard access boundary from each other.
+
+Exclude `AGENTS.override.md` through each target repository's local
+`.git/info/exclude`, and verify that it is not already tracked before adding
+local paths or keys. Do not store credentials in any Codex instruction file.
 
 Child sessions should search their selected child memory and declared parent
 memory separately. Sibling memory is not implicitly searched or exposed.

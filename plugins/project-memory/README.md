@@ -7,6 +7,9 @@ usage examples. Ordinary projects automatically become shared meta-projects
 when enrolled child directories are added. Local usage aggregates and
 sanitized errors can be inspected without opening project content databases:
 
+Keep exact path-to-key routing in a Git-excluded local `AGENTS.override.md`,
+not in the repository's portable `AGENTS.md`.
+
 ```bash
 codex-project-memory-report summary --all --since 30d
 codex-project-memory-report errors --all --last 20
