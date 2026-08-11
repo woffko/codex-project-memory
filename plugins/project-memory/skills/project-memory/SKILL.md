@@ -1,13 +1,18 @@
 ---
 name: project-memory
-description: Use local project-scoped MCP memory when troubleshooting, repeating operational actions, working with enrolled test equipment, locating project logs, or inspecting local usage and sanitized failures. Route meta-project work through the hierarchical project keys declared in AGENTS, search before repeating work, and save only a verified final solution.
+description: Use local project-scoped MCP memory when troubleshooting, repeating operational actions, working with enrolled test equipment, locating project logs, or inspecting local usage and sanitized failures. Route meta-project work through explicitly mapped hierarchical project keys, search before repeating work, and save only a verified final solution.
 ---
 
 # Project Memory workflow
 
 Use the `project_memory` MCP tools only with a project key explicitly mapped by
-the current workspace's `AGENTS.md`. Pass that key as `project` on every call.
-`project_root` remains available only for legacy configurations.
+the active workspace instructions. Keep a portable mapping in `AGENTS.md`, or
+use a Git-excluded local `AGENTS.override.md` for machine-specific paths and
+keys. A same-directory override replaces `AGENTS.md`, so it must repeat every
+instruction from that directory that needs to remain active. Never create or
+modify an instruction file merely because this skill was installed. Pass the
+mapped key as `project` on every call. `project_root` remains available only
+for legacy configurations.
 
 A project may have enrolled child projects. The parent holds shared memory; a
 child holds implementation-specific memory. The parent role is derived from
@@ -17,7 +22,7 @@ its first child is enrolled.
 ## Select the project
 
 1. Determine the active project from the task and repository-path mapping in
-   `AGENTS.md`.
+   the active workspace instructions.
 2. Call `project_memory_status` for that exact project key.
 3. If status names a `parent_project`, call status and search for that parent
    separately when the task may use shared procedures, test equipment, or

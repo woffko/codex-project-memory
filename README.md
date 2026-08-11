@@ -40,7 +40,9 @@ chmod +x scripts/install.sh plugins/project-memory/scripts/run-project-memory.sh
 The installer creates an isolated Python runtime at
 `${XDG_DATA_HOME:-~/.local/share}/codex-project-memory/runtime`, installs the
 `cryptography` dependency, registers the cloned repository as a local Codex
-marketplace, and installs the `project-memory` plugin.
+marketplace, and installs the `project-memory` plugin. It does not create,
+replace, or modify any `AGENTS.md` or `AGENTS.override.md` file. Project routing
+remains an explicit, separate configuration step.
 
 To register the marketplace directly from GitHub instead of keeping a local
 checkout:
@@ -87,33 +89,33 @@ is enrolled. Its existing database becomes shared parent memory without being
 moved or rewritten. From an enrolled parent root:
 
 ```bash
-cd /path/to/OpenMeta
+cd /path/to/ExampleSuite
 
 ~/.local/share/codex-project-memory/runtime/bin/codex-project-memory enroll \
-  --subproject OpenMeta
+  --subproject main
 
 ~/.local/share/codex-project-memory/runtime/bin/codex-project-memory enroll \
-  --subproject OpenMeta-c
+  --subproject c-port
 
 ~/.local/share/codex-project-memory/runtime/bin/codex-project-memory enroll \
-  --subproject OpenMeta-rc
+  --subproject rust-port
 ```
 
-This derives the hierarchical keys `OpenMeta/OpenMeta`,
-`OpenMeta/OpenMeta-c`, and `OpenMeta/OpenMeta-rc`. Use `--project-name` for a
-friendlier display name and `--project-key` when a different stable selector
+This derives the hierarchical keys `ExampleSuite/main`,
+`ExampleSuite/c-port`, and `ExampleSuite/rust-port`. Use `--project-name` for
+a friendlier display name and `--project-key` when a different stable selector
 is preferable. The equivalent form from a child directory is:
 
 ```bash
-cd /path/to/OpenMeta/OpenMeta-c
+cd /path/to/ExampleSuite/c-port
 ~/.local/share/codex-project-memory/runtime/bin/codex-project-memory enroll \
   --parent-root ..
 ```
 
 Subprojects must be inside their enrolled parent root. Parent status reports
 its children and `is_meta_project: true`; child status reports its
-`parent_project`. Searches remain exact: AGENTS directs Codex to search the
-active child and its parent separately.
+`parent_project`. Searches remain exact: local Codex guidance directs Codex to
+search the active child and its parent separately.
 
 A normal enrollment does not allow credential storage. Enable that capability
 separately only when the project works with resources explicitly classified as
@@ -136,11 +138,54 @@ project's `.codex/config.toml`. They keep reads and ordinary memory writes
 automatic, while requiring approval to store or reveal test-only credentials
 and to deprecate a record.
 
-Add and customize the routing guidance from
-[`examples/AGENTS.md`](examples/AGENTS.md) in the workspace's `AGENTS.md`. It
-maps repository paths to hierarchical project keys and tells Codex when to use
-shared parent memory. The plugin bundles the same workflow as a skill, while
-project guidance supplies the exact local mapping.
+Project Memory routing belongs in the active workspace instructions; plugin
+installation does not change those files. Keep a portable mapping in an
+existing tracked `AGENTS.md` when that is appropriate for every checkout. If
+the mapping contains machine-specific paths or project keys, use an ignored
+local `AGENTS.override.md` instead.
+
+**Important:** at each directory level, Codex loads at most one instruction
+file. `AGENTS.override.md` takes precedence over and replaces `AGENTS.md` in
+the same directory; the two files are not merged. Before enabling an override,
+copy every same-directory instruction that must remain active into it. Codex
+does concatenate the selected instruction files from parent directories down
+to the working directory, so a nested override can specialize a child while a
+selected parent instruction file remains in the chain.
+
+First, exclude that filename in the target repository without changing its
+shared `.gitignore`:
+
+```gitignore
+# .git/info/exclude
+AGENTS.override.md
+```
+
+A pattern without a slash excludes that filename at any depth in the current
+repository. Independent nested repositories have their own `.git` directory
+and need the same local exclusion separately. Exclusion does not make an
+already tracked file private, so confirm the destination is ignored and
+untracked before adding local paths or keys:
+
+```bash
+git check-ignore -v AGENTS.override.md
+git ls-files --error-unmatch AGENTS.override.md
+```
+
+The first command should identify `.git/info/exclude`; the second should fail
+because the file is not tracked. Then copy and customize
+[`examples/AGENTS.override.md`](examples/AGENTS.override.md) in the workspace
+or relevant subproject. Keep the root override aware of every child path when
+sessions start from a common meta-project root. A closer nested override can
+supply a child-specific mapping when Codex starts inside that directory.
+
+The plugin bundles the generic memory workflow as a skill, while the ignored
+override supplies the exact local mapping. Do not put credentials in the
+override. Codex builds its instruction chain when a session starts, so begin a
+new session after creating or changing the file.
+
+Existing mappings in `AGENTS.md` remain compatible when no same-directory
+`AGENTS.override.md` replaces that file. Installing or updating Project Memory
+does not require moving an existing mapping into an override.
 
 After installation or configuration changes, start a new Codex session from
 the enrolled project or common meta-project root:
@@ -186,10 +231,10 @@ project content databases or decrypts records:
   summary --all --since 30d
 
 ~/.local/share/codex-project-memory/runtime/bin/codex-project-memory-report \
-  summary --project OpenMeta --include-children --since 90d
+  summary --project ExampleSuite --include-children --since 90d
 
 ~/.local/share/codex-project-memory/runtime/bin/codex-project-memory-report \
-  errors --project OpenMeta/OpenMeta-c --since 30d
+  errors --project ExampleSuite/c-port --since 30d
 
 ~/.local/share/codex-project-memory/runtime/bin/codex-project-memory-report \
   errors --all --last 20 --error-code sqlite_busy
@@ -208,9 +253,15 @@ removed manually.
 
 ## MCP tools
 
-Pass the hierarchical `project` key from `AGENTS.md` on every new tool call.
-Legacy `project_root` arguments remain supported for existing configurations.
-Project keys select memory but are not authentication credentials.
+Pass the hierarchical `project` key from the active workspace instruction
+mapping on every new tool call. Codex supplies this selector when it invokes
+the MCP tool; the user does not need to type it for every call. Explicit
+selection is required because one global MCP server may serve several enrolled
+project databases and must not guess the read or write target. A local
+`AGENTS.override.md` is optional and is only needed for machine-specific
+routing. Legacy `project_root` arguments remain supported for existing
+configurations. Project keys select memory but are not authentication
+credentials.
 
 | Tool | Purpose |
 | --- | --- |
@@ -259,7 +310,7 @@ Create a consistent SQLite backup:
 
 ```bash
 ~/.local/share/codex-project-memory/runtime/bin/codex-project-memory backup \
-  --project OpenMeta/OpenMeta-c
+  --project ExampleSuite/c-port
 ```
 
 `backup --project-root /path/to/project` remains available for legacy scripts.
@@ -270,7 +321,8 @@ Registry schema 1 entries are upgraded to schema 2 when read and persisted on
 the next enrollment. Existing project IDs, SQLite directories, encrypted
 records, and backups are preserved. Existing projects receive a project key
 from their stored project name; duplicate legacy names receive a stable hash
-suffix and should be added to the workspace's AGENTS routing explicitly.
+suffix and should be added to the workspace's local `AGENTS.override.md`
+routing explicitly.
 
 Never copy `master.key` into a repository. Restoring encrypted test fields
 requires both the database and its corresponding key.
@@ -303,6 +355,11 @@ python3 plugins/project-memory/scripts/test_project_memory.py
 python3 plugins/project-memory/scripts/test_project_memory_metrics.py
 python3 /path/to/plugin-creator/scripts/validate_plugin.py plugins/project-memory
 ```
+
+The tracked plugin manifest uses a canonical SemVer version. Ordinary feature
+branches must not commit timestamp cachebuster suffixes. Bump the repository
+version once in an integration or release change; local development installs
+may add a cachebuster only in an untracked installation or staging copy.
 
 The tests cover hierarchical project routing, legacy registry migration,
 stable encrypted-record identity, minimum occurrence counts, verified

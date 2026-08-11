@@ -1,6 +1,6 @@
 {
   "name": "project-memory",
-  "version": "0.3.0+codex.20260809064743",
+  "version": "0.3.1",
   "description": "Local hierarchical project memory with private usage and error diagnostics.",
   "author": {
     "name": "woffko",

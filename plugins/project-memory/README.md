@@ -7,6 +7,11 @@ usage examples. Ordinary projects automatically become shared meta-projects
 when enrolled child directories are added. Local usage aggregates and
 sanitized errors can be inspected without opening project content databases:
 
+Plugin installation does not create or modify `AGENTS.md` or
+`AGENTS.override.md`. Keep portable routing in an existing `AGENTS.md`, or use
+a Git-excluded local `AGENTS.override.md` for machine-specific routing. A
+same-directory override replaces `AGENTS.md`; it does not extend it.
+
 ```bash
 codex-project-memory-report summary --all --since 30d
 codex-project-memory-report errors --all --last 20

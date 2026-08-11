@@ -31,6 +31,7 @@ echo "Add a child from an enrolled parent with:"
 echo "  $runtime_root/bin/codex-project-memory enroll --subproject RELATIVE-PATH"
 echo "View local usage and sanitized errors with:"
 echo "  $runtime_root/bin/codex-project-memory-report summary --all --since 30d"
+echo "The installer did not create or modify AGENTS.md or AGENTS.override.md."
 echo
 echo "Add --allow-test-secrets only for projects that may store credentials for explicitly test-only assets."
 echo "Start a new Codex thread after enrollment."

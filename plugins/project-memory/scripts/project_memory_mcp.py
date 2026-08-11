@@ -1182,7 +1182,7 @@ class ProjectMemory:
 PROJECT_SELECTOR_PROPERTIES: dict[str, Any] = {
     "project": {
         "type": "string",
-        "description": "Hierarchical project key from the current workspace AGENTS mapping, for example OpenMeta/OpenMeta-c.",
+        "description": "Hierarchical project key from active workspace instructions, for example ExampleSuite/c-port.",
     },
     "project_root": {
         "type": "string",
@@ -1211,7 +1211,7 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "project_memory_search",
         "title": "Search Project Memory",
-        "description": "Search one selected project's non-secret memory. Search its parent separately when AGENTS directs it.",
+        "description": "Search one selected project's non-secret memory. Search its parent separately when active workspace guidance directs it.",
         "inputSchema": tool_input(
             {
                 "query": {"type": "string"},
@@ -1513,7 +1513,7 @@ def serve() -> None:
             method = message.get("method")
             request_id = message.get("id")
             if method == "initialize":
-                send({"jsonrpc": "2.0", "id": request_id, "result": {"protocolVersion": message.get("params", {}).get("protocolVersion", PROTOCOL_VERSION), "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION}, "instructions": "Use the hierarchical project key mapped by the current workspace AGENTS file. Search a subproject and its declared parent separately, write to the exact selected project, finalize only verified solutions, mark whether retrieved records were useful, and use local sanitized statistics only when requested."}})
+                send({"jsonrpc": "2.0", "id": request_id, "result": {"protocolVersion": message.get("params", {}).get("protocolVersion", PROTOCOL_VERSION), "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION}, "instructions": "Use the hierarchical project key mapped by active workspace instructions. Search a subproject and its declared parent separately, write to the exact selected project, finalize only verified solutions, mark whether retrieved records were useful, and use local sanitized statistics only when requested."}})
             elif method == "ping":
                 send({"jsonrpc": "2.0", "id": request_id, "result": {}})
             elif method == "tools/list":
