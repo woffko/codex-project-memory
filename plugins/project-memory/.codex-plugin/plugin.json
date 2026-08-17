@@ -1,7 +1,7 @@
 {
   "name": "project-memory",
-  "version": "0.3.1",
-  "description": "Local hierarchical project memory with private usage and error diagnostics.",
+  "version": "0.4.0",
+  "description": "Local multi-scope project memory with private usage and error diagnostics.",
   "author": {
     "name": "woffko",
     "url": "https://github.com/woffko"
@@ -19,8 +19,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Project Memory",
-    "shortDescription": "Remember verified project and subproject procedures locally.",
-    "longDescription": "Routes recurring actions and verified solutions through hierarchical project keys, with local-only usage aggregates, sanitized error diagnostics, and a read-only report tool.",
+    "shortDescription": "Remember verified project and component procedures locally.",
+    "longDescription": "Routes recurring actions and verified solutions through hierarchical project keys, including independent memories at one repository root, with local-only usage aggregates, sanitized error diagnostics, and a read-only report tool.",
     "developerName": "woffko",
     "category": "Productivity",
     "capabilities": [

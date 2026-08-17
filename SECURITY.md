@@ -14,16 +14,19 @@ not send stored records anywhere by itself.
 - Only canonical project roots explicitly enrolled in the registry are
   accepted. Same-named checkouts do not automatically share a database.
 - Hierarchical project keys are selectors, not passwords. Keys are unique
-  case-insensitively, map to canonical enrolled roots, and do not replace root
-  validation.
-- A subproject must be physically contained by its enrolled parent root.
-  Parent/meta-project status is derived from registered child relationships;
-  adding a child does not move or rewrite the parent's existing database.
+  case-insensitively and map to logical projects. Several logical projects may
+  intentionally share one canonical root, but each has a separate project ID
+  and database. A root-only selector resolves its designated default project.
+- A child project's root must equal or be physically contained by its enrolled
+  parent root. Parent/meta-project status is derived from registered child
+  relationships; adding a child does not move or rewrite the parent's existing
+  database.
 
 ## Project routing boundary
 
-Active workspace instructions map repository paths to enrolled project keys
-and help prevent accidental cross-project memory use. Portable mappings may
+Active workspace instructions map repository paths and, where needed, task or
+component scopes to enrolled project keys and help prevent accidental
+cross-project memory use. Portable mappings may
 remain in a tracked `AGENTS.md`; machine-specific mappings belong in an
 ignored local `AGENTS.override.md`. The installer never creates or modifies
 either file. Routing guidance is a workflow boundary, not an authorization
@@ -40,6 +43,9 @@ directory. Do not store credentials in any Codex instruction file.
 
 Child sessions should search their selected child memory and declared parent
 memory separately. Sibling memory is not implicitly searched or exposed.
+Same-root logical projects are an organizational routing boundary, not an
+access-control boundary; use separate OS accounts or storage homes when hard
+isolation is required.
 
 ## Local usage diagnostics
 

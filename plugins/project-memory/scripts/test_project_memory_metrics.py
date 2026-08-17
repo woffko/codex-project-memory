@@ -108,6 +108,43 @@ class ProjectMemoryMetricsTest(unittest.TestCase):
         self.assertEqual(rows["pilot/rust"]["search_hit_rate"], 0.0)
         self.assertEqual(rows["pilot/rust"]["reads"], 1)
 
+    def test_same_root_projects_have_separate_metrics_and_child_aggregation(self):
+        gui = self.memory.enroll(
+            str(self.project),
+            "Pilot GUI",
+            project_key="pilot/gui",
+            parent_project="pilot",
+        )
+        module.call_tool(
+            self.memory,
+            "project_memory_status",
+            {"project_root": str(self.project)},
+        )
+        module.call_tool(self.memory, "project_memory_search", {"project": "pilot/gui", "query": "missing"})
+
+        default_only = self.memory.metrics_report(
+            project_root=str(self.project),
+            since_days=30,
+        )
+        self.assertEqual([row["project"] for row in default_only["projects"]], ["pilot"])
+        self.assertEqual(default_only["projects"][0]["probes"], 1)
+
+        aggregated = self.memory.metrics_report(
+            project="pilot",
+            include_children=True,
+            since_days=30,
+        )
+        rows = {row["project"]: row for row in aggregated["projects"]}
+        self.assertEqual(set(rows), {"pilot", "pilot/gui"})
+        self.assertEqual(rows["pilot/gui"]["reads"], 1)
+        self.assertNotEqual(gui["project_id"], self.entry["project_id"])
+
+        all_projects = self.memory.metrics_report(all_projects=True, since_days=30)
+        self.assertEqual(
+            {row["project"] for row in all_projects["projects"]},
+            {"pilot", "pilot/gui"},
+        )
+
     def test_structured_error_keeps_clues_but_not_user_content(self):
         credential = "password" + "=" + "fixture-value-never-store"
         self.call("project_memory_search", query=credential)

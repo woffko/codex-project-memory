@@ -26,9 +26,9 @@ from project_memory_metrics import MetricsStore
 
 
 SERVER_NAME = "Project Memory"
-SERVER_VERSION = "0.3.0"
+SERVER_VERSION = "0.4.0"
 PROTOCOL_VERSION = "2025-11-25"
-REGISTRY_SCHEMA_VERSION = 2
+REGISTRY_SCHEMA_VERSION = 3
 SECRET_PATTERNS = (
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----", re.I),
     re.compile(r"\b(?:password|passwd|pwd|token|api[_-]?key|secret)\s*[:=]\s*[^\s,;]+", re.I),
@@ -251,17 +251,52 @@ class ProjectMemory:
                 category="configuration",
                 phase="registry",
             )
-        projects = registry.setdefault("projects", {})
+        source_projects = registry.setdefault("projects", {})
+        source_roots = registry.get("roots", {}) if version >= 3 else {}
+        if version >= 3 and not isinstance(source_roots, dict):
+            raise MemoryError(
+                "invalid project-memory root index",
+                code="registry_invalid",
+                category="configuration",
+                phase="registry",
+            )
+
+        projects: dict[str, dict[str, Any]] = {}
+        roots: dict[str, dict[str, Any]] = {}
         used_keys: set[str] = set()
-        for root in sorted(projects):
-            entry = projects[root]
+        source_items = sorted(source_projects.items())
+        for stored_key, entry in source_items:
             if not isinstance(entry, dict):
                 raise MemoryError(
-                    f"invalid registry entry for project root: {root}",
+                    f"invalid registry entry: {stored_key}",
                     code="registry_invalid",
                     category="configuration",
                     phase="registry",
                 )
+            project_id = entry.get("project_id")
+            if not isinstance(project_id, str) or not project_id:
+                raise MemoryError(
+                    f"registry entry has no project id: {stored_key}",
+                    code="registry_invalid",
+                    category="configuration",
+                    phase="registry",
+                )
+            if version >= 3 and stored_key != project_id:
+                raise MemoryError(
+                    f"registry project-id mismatch: {stored_key}",
+                    code="registry_invalid",
+                    category="configuration",
+                    phase="registry",
+                )
+            root = entry.get("project_root") or (stored_key if version < 3 else None)
+            if not isinstance(root, str) or not root:
+                raise MemoryError(
+                    f"registry entry has no project root: {stored_key}",
+                    code="registry_invalid",
+                    category="configuration",
+                    phase="registry",
+                )
+            entry["project_root"] = root
             candidate = entry.get("project_key") or entry.get("project_name") or Path(root).name or "project"
             try:
                 candidate = normalize_project_key(candidate)
@@ -277,12 +312,48 @@ class ProjectMemory:
             used_keys.add(candidate.casefold())
             entry["project_key"] = candidate
             entry.setdefault("parent_project_id", None)
+            if project_id in projects:
+                raise MemoryError(
+                    f"duplicate registry project id: {project_id}",
+                    code="registry_invalid",
+                    category="configuration",
+                    phase="registry",
+                )
+            projects[project_id] = entry
+            roots.setdefault(root, {"default_project_id": None, "project_ids": []})[
+                "project_ids"
+            ].append(project_id)
+
+        for root, index in roots.items():
+            previous = source_roots.get(root, {}) if isinstance(source_roots.get(root, {}), dict) else {}
+            previous_ids = previous.get("project_ids", [])
+            if not isinstance(previous_ids, list):
+                previous_ids = []
+            grouped_ids = set(index["project_ids"])
+            ordered_ids = [
+                project_id
+                for project_id in previous_ids
+                if isinstance(project_id, str) and project_id in grouped_ids
+            ]
+            ordered_ids.extend(
+                project_id
+                for project_id in index["project_ids"]
+                if project_id not in ordered_ids
+            )
+            previous_default = previous.get("default_project_id")
+            if previous_default not in grouped_ids:
+                previous_default = ordered_ids[0]
+            index["default_project_id"] = previous_default
+            index["project_ids"] = ordered_ids
+
+        registry["projects"] = projects
+        registry["roots"] = roots
         registry["schema_version"] = REGISTRY_SCHEMA_VERSION
         return registry
 
     def _load_registry(self) -> dict[str, Any]:
         if not self.registry_path.exists():
-            return {"schema_version": REGISTRY_SCHEMA_VERSION, "projects": {}}
+            return {"schema_version": REGISTRY_SCHEMA_VERSION, "projects": {}, "roots": {}}
         try:
             return self._upgrade_registry(json.loads(self.registry_path.read_text(encoding="utf-8")))
         except (OSError, json.JSONDecodeError) as exc:
@@ -306,11 +377,17 @@ class ProjectMemory:
     def _entry_by_id(self, registry: dict[str, Any], project_id: str | None) -> dict[str, Any] | None:
         if not project_id:
             return None
-        return next((entry for entry in registry["projects"].values() if entry.get("project_id") == project_id), None)
+        return registry["projects"].get(project_id)
 
     def _entry_by_key(self, registry: dict[str, Any], project_key: str) -> dict[str, Any] | None:
         folded = normalize_project_key(project_key).casefold()
         return next((entry for entry in registry["projects"].values() if entry["project_key"].casefold() == folded), None)
+
+    def _entries_for_root(self, registry: dict[str, Any], root: str) -> list[dict[str, Any]]:
+        index = registry["roots"].get(root)
+        if not index:
+            return []
+        return [registry["projects"][project_id] for project_id in index["project_ids"]]
 
     def _describe_entry(self, registry: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
         parent = self._entry_by_id(registry, entry.get("parent_project_id"))
@@ -319,11 +396,18 @@ class ProjectMemory:
             for child in registry["projects"].values()
             if child.get("parent_project_id") == entry["project_id"]
         )
+        root_index = registry["roots"].get(entry["project_root"], {})
+        same_root_projects = sorted(
+            (candidate["project_key"] for candidate in self._entries_for_root(registry, entry["project_root"])),
+            key=str.casefold,
+        )
         return {
             **entry,
             "parent_project": parent["project_key"] if parent else None,
             "children": children,
             "is_meta_project": bool(children),
+            "same_root_projects": same_root_projects,
+            "is_default_for_root": root_index.get("default_project_id") == entry["project_id"],
         }
 
     def _resolve_root_in_registry(self, registry: dict[str, Any], project_root: str) -> dict[str, Any]:
@@ -336,15 +420,16 @@ class ProjectMemory:
                 category="configuration",
                 phase="resolve_project",
             ) from exc
-        entry = registry["projects"].get(root)
-        if not entry:
+        index = registry["roots"].get(root)
+        if not index:
             raise MemoryError(
                 f"project is not enrolled: {root}",
                 code="project_not_enrolled",
                 category="configuration",
                 phase="resolve_project",
             )
-        if entry.get("project_root") != root:
+        entry = self._entry_by_id(registry, index.get("default_project_id"))
+        if not entry or entry.get("project_root") != root:
             raise MemoryError(
                 "registry project-root mismatch",
                 code="registry_root_mismatch",
@@ -360,6 +445,7 @@ class ProjectMemory:
         allow_test_secrets: bool | None,
         parent_root: str | None,
         project_key: str | None,
+        parent_project: str | None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         try:
             root = canonical(project_root)
@@ -370,15 +456,44 @@ class ProjectMemory:
                 category="configuration",
                 phase="enroll",
             ) from exc
+        if parent_root is not None and parent_project is not None:
+            raise MemoryError(
+                "parent_root and parent_project are mutually exclusive",
+                code="invalid_parent",
+                category="configuration",
+                phase="enroll",
+            )
+
         registry = self._load_registry()
-        existing = registry["projects"].get(root)
+        root_entries = self._entries_for_root(registry, root)
+        default_existing = self._resolve_root_in_registry(registry, root) if root_entries else None
+        requested_key = normalize_project_key(project_key) if project_key is not None else None
+        keyed_existing = self._entry_by_key(registry, requested_key) if requested_key else None
+        if keyed_existing and keyed_existing["project_root"] != root:
+            raise MemoryError(
+                f"project key is already enrolled: {requested_key}",
+                code="project_key_conflict",
+                category="configuration",
+                phase="enroll",
+            )
+        existing = keyed_existing if requested_key is not None else default_existing
         parent = None
         parent_project_id = existing.get("parent_project_id") if existing else None
-        if parent_root is not None:
+        if parent_project is not None:
+            parent = self._entry_by_key(registry, parent_project)
+            if not parent:
+                raise MemoryError(
+                    f"parent project is not enrolled: {normalize_project_key(parent_project)}",
+                    code="parent_not_enrolled",
+                    category="configuration",
+                    phase="enroll",
+                )
+        elif parent_root is not None:
             parent = self._resolve_root_in_registry(registry, parent_root)
+        if parent:
             parent_path = Path(parent["project_root"])
             try:
-                relative = Path(root).relative_to(parent_path)
+                Path(root).relative_to(parent_path)
             except ValueError as exc:
                 raise MemoryError(
                     "subproject root must be inside its parent project root",
@@ -386,13 +501,6 @@ class ProjectMemory:
                     category="configuration",
                     phase="enroll",
                 ) from exc
-            if not relative.parts:
-                raise MemoryError(
-                    "a project cannot be its own parent",
-                    code="invalid_parent",
-                    category="configuration",
-                    phase="enroll",
-                )
             parent_project_id = parent["project_id"]
         elif parent_project_id:
             parent = self._entry_by_id(registry, parent_project_id)
@@ -413,9 +521,9 @@ class ProjectMemory:
         name = name or "project"
         default_key_segment = Path(root).name or "project"
 
-        if project_key is not None:
-            key = normalize_project_key(project_key)
-        elif parent_root is not None and parent:
+        if requested_key is not None:
+            key = existing["project_key"] if existing else requested_key
+        elif (parent_root is not None or parent_project is not None) and parent:
             key = normalize_project_key(f"{parent['project_key']}/{default_key_segment}")
         elif existing:
             key = existing["project_key"]
@@ -431,7 +539,7 @@ class ProjectMemory:
                     phase="enroll",
                 )
         conflicting = self._entry_by_key(registry, key)
-        if conflicting and conflicting.get("project_root") != root:
+        if conflicting and (not existing or conflicting["project_id"] != existing["project_id"]):
             raise MemoryError(
                 f"project key is already enrolled: {key}",
                 code="project_key_conflict",
@@ -443,7 +551,7 @@ class ProjectMemory:
                 child.get("parent_project_id") == existing["project_id"]
                 for child in registry["projects"].values()
             )
-            if parent_root is None:
+            if parent is None:
                 raise MemoryError(
                     "project key is stable; supply a parent only when attaching an existing standalone project",
                     code="project_key_stable",
@@ -470,8 +578,23 @@ class ProjectMemory:
         except (OSError, subprocess.SubprocessError):
             pass
         identity = f"{remote}\n{root}" if remote else root
+        if root_entries and not existing:
+            identity = f"{identity}\n{key.casefold()}"
         slug = re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-") or "project"
         project_id = existing["project_id"] if existing else f"{slug}-{hashlib.sha256(identity.encode()).hexdigest()[:12]}"
+        ancestor = parent
+        visited_parent_ids: set[str] = set()
+        while ancestor:
+            ancestor_id = ancestor["project_id"]
+            if ancestor_id == project_id or ancestor_id in visited_parent_ids:
+                raise MemoryError(
+                    "project parent relationship would create a cycle",
+                    code="invalid_parent",
+                    category="configuration",
+                    phase="enroll",
+                )
+            visited_parent_ids.add(ancestor_id)
+            ancestor = self._entry_by_id(registry, ancestor.get("parent_project_id"))
         entry = {
             "project_id": project_id,
             "project_key": key,
@@ -482,7 +605,15 @@ class ProjectMemory:
             "allow_test_secrets": (existing or {}).get("allow_test_secrets", False) if allow_test_secrets is None else bool(allow_test_secrets),
             "enrolled_at": existing.get("enrolled_at", utc_now()) if existing else utc_now(),
         }
-        registry["projects"][root] = entry
+        registry["projects"][project_id] = entry
+        root_index = registry["roots"].setdefault(
+            root,
+            {"default_project_id": project_id, "project_ids": []},
+        )
+        if project_id not in root_index["project_ids"]:
+            root_index["project_ids"].append(project_id)
+        if not root_index.get("default_project_id"):
+            root_index["default_project_id"] = project_id
         return registry, entry
 
     def preview_enrollment(
@@ -492,9 +623,15 @@ class ProjectMemory:
         allow_test_secrets: bool | None = None,
         parent_root: str | None = None,
         project_key: str | None = None,
+        parent_project: str | None = None,
     ) -> dict[str, Any]:
         registry, entry = self._prepare_enrollment(
-            project_root, project_name, allow_test_secrets, parent_root, project_key
+            project_root,
+            project_name,
+            allow_test_secrets,
+            parent_root,
+            project_key,
+            parent_project,
         )
         return self._describe_entry(registry, entry)
 
@@ -505,9 +642,15 @@ class ProjectMemory:
         allow_test_secrets: bool | None = None,
         parent_root: str | None = None,
         project_key: str | None = None,
+        parent_project: str | None = None,
     ) -> dict[str, Any]:
         registry, entry = self._prepare_enrollment(
-            project_root, project_name, allow_test_secrets, parent_root, project_key
+            project_root,
+            project_name,
+            allow_test_secrets,
+            parent_root,
+            project_key,
+            parent_project,
         )
         self._save_registry(registry)
         project_dir = self.data_home / "projects" / entry["project_id"]
@@ -537,10 +680,18 @@ class ProjectMemory:
         if project is not None:
             entry = self.resolve_project_key(require_text(args, "project", 1000))
             if project_root is not None:
-                root_entry = self.resolve_project(require_text(args, "project_root", 4096))
-                if root_entry["project_id"] != entry["project_id"]:
+                try:
+                    selected_root = canonical(require_text(args, "project_root", 4096))
+                except (OSError, RuntimeError) as exc:
                     raise MemoryError(
-                        "project and project_root identify different enrolled projects",
+                        f"invalid project root: {exc}",
+                        code="invalid_project_root",
+                        category="configuration",
+                        phase="resolve_project",
+                    ) from exc
+                if selected_root != entry["project_root"]:
+                    raise MemoryError(
+                        "project and project_root identify different project roots",
                         code="selector_mismatch",
                         category="configuration",
                         phase="resolve_project",
@@ -713,6 +864,8 @@ class ProjectMemory:
             "parent_project": described["parent_project"],
             "children": described["children"],
             "is_meta_project": described["is_meta_project"],
+            "same_root_projects": described["same_root_projects"],
+            "is_default_for_root": described["is_default_for_root"],
             "allow_test_secrets": entry["allow_test_secrets"],
             "counts": counts,
             "usage_30d": usage,
@@ -1388,7 +1541,7 @@ def project_id_hint(memory: ProjectMemory, args: dict[str, Any]) -> str | None:
             return entry["project_id"] if entry else None
         project_root = args.get("project_root")
         if isinstance(project_root, str) and project_root.strip():
-            entry = registry["projects"].get(canonical(project_root))
+            entry = memory._resolve_root_in_registry(registry, project_root)
             return entry["project_id"] if entry else None
     except (MemoryError, OSError, RuntimeError):
         pass
@@ -1560,8 +1713,9 @@ def main() -> None:
     enroll_parser = subparsers.add_parser("enroll")
     enroll_parser.add_argument("--project-root", help="Project root, or parent root when --subproject is used; defaults to the current directory")
     enroll_parser.add_argument("--project-name", help="Display name; defaults to the project directory name")
-    enroll_parser.add_argument("--project-key", help="Stable hierarchical selector; defaults to the folder name under its parent key")
+    enroll_parser.add_argument("--project-key", help="Stable selector; a new explicit key creates a separate memory even when the root is already enrolled")
     enroll_parser.add_argument("--parent-root", help="Existing enrolled parent for the project root")
+    enroll_parser.add_argument("--parent-project", help="Existing parent project key; supports logical subprojects at the same root")
     enroll_parser.add_argument("--subproject", help="Child path relative to the parent project root")
     enroll_parser.add_argument("--allow-test-secrets", action="store_true", default=None)
     enroll_parser.add_argument("-y", "--yes", action="store_true", help="Skip interactive confirmation")
@@ -1574,12 +1728,15 @@ def main() -> None:
     if args.command == "serve":
         serve()
     elif args.command == "enroll":
+        if args.parent_root and args.parent_project:
+            parser.error("--parent-root and --parent-project cannot be used together")
         if args.subproject and args.parent_root:
-            parser.error("--subproject and --parent-root cannot be used together")
+            parser.error("--subproject cannot be combined with --parent-root")
         if args.subproject:
-            parent_root = args.project_root or os.getcwd()
+            path_parent_root = args.project_root or os.getcwd()
             child = Path(args.subproject).expanduser()
-            project_root = str(child if child.is_absolute() else Path(parent_root) / child)
+            project_root = str(child if child.is_absolute() else Path(path_parent_root) / child)
+            parent_root = None if args.parent_project else path_parent_root
         else:
             project_root = args.project_root or os.getcwd()
             parent_root = args.parent_root
@@ -1589,6 +1746,7 @@ def main() -> None:
             args.allow_test_secrets,
             parent_root,
             args.project_key,
+            args.parent_project,
         )
         if sys.stdin.isatty() and not args.yes:
             print("Enroll Project Memory?", file=sys.stderr)
@@ -1608,6 +1766,7 @@ def main() -> None:
             args.allow_test_secrets,
             parent_root,
             args.project_key,
+            args.parent_project,
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
     elif args.command == "backup":

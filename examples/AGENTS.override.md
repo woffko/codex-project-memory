@@ -19,6 +19,10 @@ this file automatically.
 - Files and procedures shared by the whole workspace use project
   `ExampleSuite`; add an explicit child mapping for any other repository that
   needs separate memory.
+- If several keys intentionally share the same repository root, route by task
+  scope as well as path. For example, core-library work may use
+  `ExampleSuite/core` while GUI work uses `ExampleSuite/gui`; do not use the
+  root-only selector to distinguish them.
 - At task start, determine the active project from the task and target paths.
 - Search the active child project first, then search its declared parent shown
   by `project_memory_status` for shared procedures, test equipment, and
