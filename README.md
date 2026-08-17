@@ -79,8 +79,46 @@ remain available:
 ```
 
 The project key is the stable selector used in MCP calls. It is not a password
-or security token. The canonical enrolled root remains the storage identity
-and the containment boundary used when attaching subprojects.
+or security token. A root has one default project for backward-compatible
+`project_root` calls, but it may also have additional logical projects selected
+by key. Each project key has its own stable project ID and SQLite database.
+
+With no explicit `--project-key`, enrollment selects or updates the root's
+default project. An explicit key that already exists selects that project. A
+new explicit key on an enrolled root creates another independent project; it
+does not rename or replace the default project or its records.
+
+### Enroll multiple projects at one repository root
+
+Use this when one repository has distinct work scopes such as a core library
+and GUI, but all Codex sessions must start at the same root:
+
+```bash
+cd /path/to/Product
+
+# Existing or shared default memory for the repository.
+~/.local/share/codex-project-memory/runtime/bin/codex-project-memory enroll \
+  --project-name "Product" \
+  --project-key "Product"
+
+# Independent memories at the exact same canonical root.
+~/.local/share/codex-project-memory/runtime/bin/codex-project-memory enroll \
+  --project-name "Product Core" \
+  --project-key "Product/core" \
+  --parent-project "Product"
+
+~/.local/share/codex-project-memory/runtime/bin/codex-project-memory enroll \
+  --project-name "Product GUI" \
+  --project-key "Product/gui" \
+  --parent-project "Product"
+```
+
+`--parent-project` selects the logical parent by project key, so it remains
+unambiguous when parent and child use the same path. Omit it if the memories
+should be independent peers. Status reports `same_root_projects`,
+`is_default_for_root`, `parent_project`, and `children`. Workspace instructions
+must route by task or component as well as path because the path alone cannot
+distinguish these memories.
 
 ### Enroll related subprojects
 
@@ -112,10 +150,21 @@ cd /path/to/ExampleSuite/c-port
   --parent-root ..
 ```
 
-Subprojects must be inside their enrolled parent root. Parent status reports
-its children and `is_meta_project: true`; child status reports its
+Nested-directory subprojects must be inside their enrolled parent root. Parent
+status reports its children and `is_meta_project: true`; child status reports its
 `parent_project`. Searches remain exact: local Codex guidance directs Codex to
 search the active child and its parent separately.
+
+If the intended parent is not the default project for its root, select it by
+key. The shorthand still derives the child path from `--project-root`:
+
+```bash
+~/.local/share/codex-project-memory/runtime/bin/codex-project-memory enroll \
+  --project-root /path/to/Product \
+  --subproject plugins/gui \
+  --project-key Product/core/gui-plugin \
+  --parent-project Product/core
+```
 
 A normal enrollment does not allow credential storage. Enable that capability
 separately only when the project works with resources explicitly classified as
@@ -257,11 +306,12 @@ Pass the hierarchical `project` key from the active workspace instruction
 mapping on every new tool call. Codex supplies this selector when it invokes
 the MCP tool; the user does not need to type it for every call. Explicit
 selection is required because one global MCP server may serve several enrolled
-project databases and must not guess the read or write target. A local
+project databases, including several at one root, and must not guess the read
+or write target. A local
 `AGENTS.override.md` is optional and is only needed for machine-specific
 routing. Legacy `project_root` arguments remain supported for existing
-configurations. Project keys select memory but are not authentication
-credentials.
+configurations and resolve only the root's default project. Project keys select
+memory but are not authentication credentials.
 
 | Tool | Purpose |
 | --- | --- |
@@ -317,12 +367,14 @@ Create a consistent SQLite backup:
 
 ### Registry migration
 
-Registry schema 1 entries are upgraded to schema 2 when read and persisted on
-the next enrollment. Existing project IDs, SQLite directories, encrypted
-records, and backups are preserved. Existing projects receive a project key
-from their stored project name; duplicate legacy names receive a stable hash
-suffix and should be added to the workspace's local `AGENTS.override.md`
-routing explicitly.
+Registry schema 1 and 2 entries are upgraded to schema 3 when read and
+persisted on the next enrollment. Existing project IDs, default-root
+resolution, SQLite directories, parent links, encrypted records, metrics, and
+backups are preserved. The schema 3 root index allows multiple project IDs to
+refer to one canonical root while retaining the old entry as that root's
+default. Existing projects without a key receive one from their stored project
+name; duplicate legacy names receive a stable hash suffix and should be added
+to the workspace's local `AGENTS.override.md` routing explicitly.
 
 Never copy `master.key` into a repository. Restoring encrypted test fields
 requires both the database and its corresponding key.
@@ -361,11 +413,12 @@ branches must not commit timestamp cachebuster suffixes. Bump the repository
 version once in an integration or release change; local development installs
 may add a cachebuster only in an untracked installation or staging copy.
 
-The tests cover hierarchical project routing, legacy registry migration,
-stable encrypted-record identity, minimum occurrence counts, verified
-finalization, project isolation, credential rejection, XDG storage paths,
-operation classification, hierarchy reports, read-only reporting, structured
-errors, and the absence of plaintext credentials and project paths in metrics.
+The tests cover hierarchical and same-root project routing, schema 1 and 2
+migration, stable encrypted-record identity, default-root compatibility,
+minimum occurrence counts, verified finalization, project isolation,
+credential rejection, XDG storage paths, per-project operation classification,
+hierarchy reports, read-only reporting, structured errors, and the absence of
+plaintext credentials and project paths in metrics.
 
 ## Uninstall
 

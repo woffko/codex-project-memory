@@ -110,6 +110,48 @@ class ProjectMemoryTest(unittest.TestCase):
         with self.assertRaises(MODULE.MemoryError):
             self.memory.status({"project": "pilot/rust", "project_root": str(self.project)})
 
+    def test_same_root_projects_have_independent_memory_and_default_resolution(self):
+        gui = self.memory.enroll(
+            str(self.project),
+            "Pilot GUI",
+            project_key="pilot/gui",
+            parent_project="pilot",
+        )
+        reenrolled = self.memory.enroll(str(self.project), project_key="PILOT/GUI")
+
+        self.assertNotEqual(gui["project_id"], self.entry["project_id"])
+        self.assertEqual(reenrolled["project_id"], gui["project_id"])
+        self.assertEqual(gui["parent_project"], "pilot")
+        self.assertEqual(self.memory.status(self.root_arg)["project"], "pilot")
+        gui_status = self.memory.status(
+            {"project": "pilot/gui", "project_root": str(self.project)}
+        )
+        self.assertFalse(gui_status["is_default_for_root"])
+        self.assertEqual(gui_status["same_root_projects"], ["pilot", "pilot/gui"])
+        self.assertEqual(self.memory.status({"project": "pilot"})["children"], ["pilot/gui"])
+        self.assertNotEqual(self.memory._db_path(self.entry), self.memory._db_path(gui))
+
+        self.memory.note_repetition(
+            {"project": "pilot", "problem": "core queue stalls", "action": "restart core queue"}
+        )
+        self.memory.note_repetition(
+            {"project": "pilot/gui", "problem": "gui panel stalls", "action": "restart gui panel"}
+        )
+        self.assertEqual(len(self.memory.search({"project": "pilot", "query": "core"})["results"]), 1)
+        self.assertEqual(len(self.memory.search({"project": "pilot", "query": "gui"})["results"]), 0)
+        self.assertEqual(len(self.memory.search({"project": "pilot/gui", "query": "gui"})["results"]), 1)
+        self.assertEqual(len(self.memory.search({"project": "pilot/gui", "query": "core"})["results"]), 0)
+        default_backup = self.memory.backup(project_root=str(self.project))
+        gui_backup = self.memory.backup(project="pilot/gui")
+        self.assertEqual(default_backup.parent.parent, self.memory._db_path(self.entry).parent)
+        self.assertEqual(gui_backup.parent.parent, self.memory._db_path(gui).parent)
+        self.assertNotEqual(default_backup.parent.parent, gui_backup.parent.parent)
+
+        other = Path(self.temporary.name) / "other-root"
+        other.mkdir()
+        with self.assertRaises(MODULE.MemoryError):
+            self.memory.status({"project": "pilot/gui", "project_root": str(other)})
+
     def test_attaching_existing_project_preserves_id_and_encrypted_records(self):
         child = self.project / "legacy-child"
         child.mkdir()
@@ -158,8 +200,62 @@ class ProjectMemoryTest(unittest.TestCase):
         persisted = memory.enroll(str(root))
         self.assertEqual(persisted["project_id"], "legacy-id")
         registry = json.loads(registry_path.read_text(encoding="utf-8"))
-        self.assertEqual(registry["schema_version"], 2)
-        self.assertEqual(registry["projects"][str(root)]["project_key"], "Legacy")
+        self.assertEqual(registry["schema_version"], 3)
+        self.assertEqual(registry["projects"]["legacy-id"]["project_key"], "Legacy")
+        self.assertEqual(registry["roots"][str(root)]["default_project_id"], "legacy-id")
+        self.assertEqual(registry["roots"][str(root)]["project_ids"], ["legacy-id"])
+
+    def test_schema_v2_migration_preserves_id_parent_and_encrypted_record(self):
+        root = Path(self.temporary.name) / "v2-root"
+        child = root / "child"
+        child.mkdir(parents=True)
+        data = Path(self.temporary.name) / "v2-data"
+        config = Path(self.temporary.name) / "v2-config"
+        original = MODULE.ProjectMemory(data, config)
+        parent_entry = original.enroll(str(root), allow_test_secrets=True, project_key="v2")
+        child_entry = original.enroll(str(child), parent_root=str(root))
+        asset = original.store_test_asset({
+            "project": "v2",
+            "test_only": True,
+            "name": "Migration fixture",
+            "asset_type": "test fixture",
+            "secret_fields": {"credential": "migration-fixture-value"},
+        })
+        MODULE.call_tool(original, "project_memory_status", {"project": "v2"})
+        registry_path = data / "registry.json"
+        v3_registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        registry_path.write_text(
+            json.dumps({
+                "schema_version": 2,
+                "projects": {
+                    entry["project_root"]: entry
+                    for entry in v3_registry["projects"].values()
+                },
+            }),
+            encoding="utf-8",
+        )
+        original.metrics.close()
+
+        migrated = MODULE.ProjectMemory(data, config)
+        self.assertEqual(migrated.status({"project_root": str(root)})["project_id"], parent_entry["project_id"])
+        self.assertEqual(migrated.status({"project": "v2/child"})["parent_project"], "v2")
+        revealed = migrated.get(
+            {"project": "v2", "record_id": asset["id"]},
+            include_test_secrets=True,
+        )
+        self.assertEqual(revealed["secret_fields"]["credential"], "migration-fixture-value")
+        persisted = migrated.enroll(str(root))
+        self.assertEqual(persisted["project_id"], parent_entry["project_id"])
+        self.assertEqual(migrated.resolve_project_key("v2/child")["project_id"], child_entry["project_id"])
+        self.assertEqual(
+            migrated.metrics_report(project="v2", since_days=30)["projects"][0]["probes"],
+            1,
+        )
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        self.assertEqual(registry["schema_version"], 3)
+        self.assertIn(parent_entry["project_id"], registry["projects"])
+        self.assertIn(child_entry["project_id"], registry["projects"])
+        migrated.metrics.close()
 
     def test_duplicate_key_and_out_of_tree_subproject_are_rejected(self):
         duplicate = Path(self.temporary.name) / "duplicate"

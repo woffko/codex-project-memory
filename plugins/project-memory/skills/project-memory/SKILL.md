@@ -12,17 +12,21 @@ keys. A same-directory override replaces `AGENTS.md`, so it must repeat every
 instruction from that directory that needs to remain active. Never create or
 modify an instruction file merely because this skill was installed. Pass the
 mapped key as `project` on every call. `project_root` remains available only
-for legacy configurations.
+for legacy configurations and resolves only the root's default project. Never
+use `project_root` to choose among multiple logical projects at the same path.
 
-A project may have enrolled child projects. The parent holds shared memory; a
-child holds implementation-specific memory. The parent role is derived from
+A project may have enrolled child projects. A child may use a nested directory
+or the exact same canonical root as its parent. The parent holds shared memory;
+a child holds implementation-specific memory. The parent role is derived from
 its children, so an ordinary project becomes a meta-project automatically when
-its first child is enrolled.
+its first child is enrolled. Same-root projects still have separate databases
+and usage statistics.
 
 ## Select the project
 
 1. Determine the active project from the task and repository-path mapping in
-   the active workspace instructions.
+   the active workspace instructions. When keys share one root, use the mapped
+   component or task scope; the current path alone is insufficient.
 2. Call `project_memory_status` for that exact project key.
 3. If status names a `parent_project`, call status and search for that parent
    separately when the task may use shared procedures, test equipment, or
