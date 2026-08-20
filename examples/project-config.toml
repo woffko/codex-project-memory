@@ -20,5 +20,8 @@ approval_mode = "prompt"
 [plugins."project-memory".mcp_servers.project_memory.tools.project_memory_get_test_asset]
 approval_mode = "prompt"
 
+[plugins."project-memory".mcp_servers.project_memory.tools.project_memory_stage_test_asset_for_longrun]
+approval_mode = "prompt"
+
 [plugins."project-memory".mcp_servers.project_memory.tools.project_memory_deprecate]
 approval_mode = "prompt"

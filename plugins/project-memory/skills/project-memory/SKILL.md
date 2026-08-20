@@ -62,6 +62,19 @@ equipment explicitly classified as test-only. Use the admin-profile
 password, token, or key inside `secret_fields`. Retrieve it only when the active
 task needs it through the approval-gated secret-read tool.
 
+When a reviewed non-interactive Longrun command needs one stored test-asset
+field on stdin, prefer `project_memory_stage_test_asset_for_longrun`. It
+decrypts locally and returns only a short-lived one-time `stdin_secret_id`; the
+secret value never enters Codex context. Pass that handle directly to
+`longrun.start_job` or `longrun.run_and_wait`. Do not ask the user to run
+`codex-longrun-secret` when a suitable encrypted test asset already exists;
+that helper is only a fallback for a credential not yet enrolled in Project
+Memory.
+
+Use `project_memory_get_test_asset` only when the active operation genuinely
+needs the plaintext value outside Longrun and the approved destination can
+consume it without placing it in chat, argv, environment, source, or logs.
+
 Never reproduce a retrieved secret in chat, ordinary memory, source files,
 Git, patches, logs, metrics, checkpoints, provenance, delegated prompts, or
 unrelated commands. Production, personal, and ambiguously classified secrets

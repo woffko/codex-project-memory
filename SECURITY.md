@@ -117,6 +117,22 @@ checkpoints, provenance, derived context, exception messages, revisions, and
 normal record reads. Decryption uses a separate tool so Codex can apply an
 explicit approval rule.
 
+`project_memory_stage_test_asset_for_longrun` is a non-revealing alternative
+for reviewed test-only automation. It decrypts one scalar field in-process,
+stages it as a random `0600` file inside a same-user `0700` Longrun secret
+directory, and returns only a one-time handle. Neither the secret value nor the
+handle is written to Project Memory audit records or aggregate metrics. If the
+audit transaction fails, the staged file is removed. Longrun is responsible
+for owner/mode/type/TTL validation, immediate unlink, fd delivery, and output
+suppression.
+
+This handoff protects Codex transcripts, MCP arguments, argv/environment, and
+Longrun logs from the plaintext. It does not protect against root, another
+compromised process running as the same OS user, memory inspection, or local
+filesystem forensics before the one-time file is consumed. The dedicated
+plaintext reveal tool remains available for compatibility and remains
+separately approval-gated.
+
 Schema migration never decrypts or rewrites encrypted blobs. Before a schema-1
 content database is migrated, the installer creates a consistent mode-`0600`
 SQLite backup. Migration is transactional after schema scaffolding and writes

@@ -212,13 +212,47 @@ This flag does not mean “allow every secret.” It applies only to `test_asset
 records with an explicit `test_only: true`. Do not store production, personal,
 or ambiguously classified credentials.
 
+### Direct Codex-to-Longrun test credential handoff
+
+Once an explicitly test-only credential is stored, Codex can use it in a
+reviewed Longrun command without asking the user to type it again and without
+revealing the plaintext to the model:
+
+```text
+project_memory_stage_test_asset_for_longrun(
+  project="Product/lab",
+  record_id="TEST_ASSET_ID",
+  secret_field="password"
+)
+    -> stdin_secret_id="ONE_TIME_HANDLE"
+
+longrun.start_job(
+  argv=[...],
+  cwd="/absolute/enrolled/root",
+  stdin_secret_id="ONE_TIME_HANDLE",
+  wake_policy="goal"
+)
+```
+
+Project Memory decrypts the selected scalar field locally, writes a random
+`0600` one-time stdin file under the private Longrun state directory, and
+returns only its handle. Longrun validates, opens, and unlinks that file before
+passing the descriptor to the child. Secret-stdin output is suppressed by
+Longrun. The handle is single-use and expires after 300 seconds by default.
+
+`codex-longrun-secret --confirm` remains a fallback only when no suitable
+encrypted test asset exists. Ordinary `codex` can use this Project Memory tool
+too; it simply uses Longrun's manual `wake_policy="none"` behavior instead of
+the event-driven Goal bridge.
+
 ## Configure Codex in the project
 
 Add the tables from
 [`examples/project-config.toml`](examples/project-config.toml) to the trusted
 project's `.codex/config.toml`. They keep reads and ordinary memory writes
 automatic, while requiring approval to store or reveal test-only credentials
-and to deprecate a record.
+and to deprecate a record. Staging an encrypted field into a one-time Longrun
+handle is separately configurable and does not reveal the value.
 
 The default server profile is `admin` for backward compatibility. Set
 `PROJECT_MEMORY_PROFILE=lean` to expose only recall, read, remember, and
@@ -382,6 +416,7 @@ memory but are not authentication credentials.
 | `project_memory_record_log_location` | Remember a stable log location |
 | `project_memory_store_test_asset` | Store a test-only asset and encrypted fields |
 | `project_memory_get_test_asset` | Reveal encrypted fields with approval |
+| `project_memory_stage_test_asset_for_longrun` | Stage one encrypted test field as a one-time Longrun stdin handle without revealing it |
 | `project_memory_mark_used` | Mark a retrieved record as reused, helpful, unsuitable, or stale |
 | `project_memory_deprecate` | Soft-deprecate an obsolete record |
 

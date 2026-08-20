@@ -12,6 +12,12 @@ same repository root with distinct project keys and databases. Local usage
 aggregates and sanitized errors can be inspected without opening project
 content databases:
 
+For explicitly test-only assets, Codex can call
+`project_memory_stage_test_asset_for_longrun` to obtain a short-lived one-time
+stdin handle without receiving the plaintext. The manual
+`codex-longrun-secret` prompt is only a fallback when no encrypted asset is
+enrolled.
+
 Plugin installation does not create or modify `AGENTS.md` or
 `AGENTS.override.md`. Keep portable routing in an existing `AGENTS.md`, or use
 a Git-excluded local `AGENTS.override.md` for machine-specific routing. A

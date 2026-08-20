@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import time
@@ -37,7 +38,7 @@ from project_memory_views import (
 
 
 SERVER_NAME = "Project Memory"
-SERVER_VERSION = "0.5.0"
+SERVER_VERSION = "0.5.1"
 PROTOCOL_VERSION = "2025-11-25"
 REGISTRY_SCHEMA_VERSION = 3
 MEMORY_SCHEMA_VERSION = 2
@@ -47,6 +48,8 @@ DEFAULT_CARDS = 4
 MAXIMUM_CARDS = 8
 TOKEN_BYTE_RATIO = 3
 PROFILE_VALUES = {"lean", "compat", "admin"}
+DEFAULT_LONGRUN_SECRET_TTL_SEC = 300
+DEFAULT_LONGRUN_MAX_STDIN_SECRET_BYTES = 64 * 1024
 SECRET_PATTERNS = (
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----", re.I),
     re.compile(r"\b(?:password|passwd|pwd|token|api[_-]?key|secret)\s*[:=]\s*[^\s,;]+", re.I),
@@ -237,6 +240,7 @@ class ProjectMemory:
         data_home: Path | None = None,
         config_home: Path | None = None,
         *,
+        longrun_state_dir: Path | None = None,
         bound_project: str | None = None,
         profile: str | None = None,
     ):
@@ -246,6 +250,13 @@ class ProjectMemory:
         self.data_home = data_home or Path(os.environ.get("PROJECT_MEMORY_HOME", default_data_home))
         self.config_home = config_home or Path(os.environ.get("PROJECT_MEMORY_CONFIG_HOME", default_config_home))
         self.registry_path = self.data_home / "registry.json"
+        default_longrun_state = Path(
+            os.environ.get(
+                "PROJECT_MEMORY_LONGRUN_STATE_DIR",
+                Path.home() / ".local/state/codex-longrun",
+            )
+        )
+        self.longrun_state_dir = (longrun_state_dir or default_longrun_state).expanduser().resolve()
         self.metrics = MetricsStore(self.data_home / "usage.sqlite3", SERVER_VERSION)
         selected_profile = (profile or os.environ.get("PROJECT_MEMORY_PROFILE", "admin")).strip().casefold()
         if selected_profile not in PROFILE_VALUES:
@@ -263,6 +274,124 @@ class ProjectMemory:
     def _secure_dir(self, path: Path) -> None:
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         path.chmod(0o700)
+
+    @staticmethod
+    def _bounded_env_int(
+        names: tuple[str, ...],
+        default: int,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        raw = next((os.environ[name] for name in names if os.environ.get(name)), None)
+        if raw is None:
+            return default
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise MemoryError(
+                f"{names[0]} must be an integer",
+                code="longrun_secret_config_invalid",
+                category="configuration",
+                phase="stage_longrun_secret",
+            ) from exc
+        if not minimum <= value <= maximum:
+            raise MemoryError(
+                f"{names[0]} must be between {minimum} and {maximum}",
+                code="longrun_secret_config_invalid",
+                category="configuration",
+                phase="stage_longrun_secret",
+            )
+        return value
+
+    @staticmethod
+    def _secure_owned_dir(path: Path) -> None:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        details = path.lstat()
+        if not stat.S_ISDIR(details.st_mode) or stat.S_ISLNK(details.st_mode):
+            raise MemoryError(
+                "Longrun secret storage is not a real directory",
+                code="longrun_secret_storage_invalid",
+                category="security",
+                phase="stage_longrun_secret",
+            )
+        if details.st_uid != os.getuid():
+            raise MemoryError(
+                "Longrun secret storage has the wrong owner",
+                code="longrun_secret_storage_invalid",
+                category="security",
+                phase="stage_longrun_secret",
+            )
+        path.chmod(0o700)
+
+    def _stage_longrun_stdin(self, payload: bytes) -> tuple[str, int]:
+        ttl_sec = self._bounded_env_int(
+            ("PROJECT_MEMORY_LONGRUN_SECRET_TTL_SEC", "LONGRUN_SECRET_TTL_SEC"),
+            DEFAULT_LONGRUN_SECRET_TTL_SEC,
+            30,
+            3600,
+        )
+        max_bytes = self._bounded_env_int(
+            (
+                "PROJECT_MEMORY_LONGRUN_MAX_STDIN_SECRET_BYTES",
+                "LONGRUN_MAX_STDIN_SECRET_BYTES",
+            ),
+            DEFAULT_LONGRUN_MAX_STDIN_SECRET_BYTES,
+            1,
+            1024 * 1024,
+        )
+        if not payload or len(payload) > max_bytes:
+            raise MemoryError(
+                "test-asset field has an invalid size for Longrun stdin",
+                code="longrun_secret_size_invalid",
+                category="security",
+                phase="stage_longrun_secret",
+            )
+        self._secure_owned_dir(self.longrun_state_dir)
+        directory = self.longrun_state_dir / "secrets"
+        self._secure_owned_dir(directory)
+        cutoff = time.time() - ttl_sec
+        for candidate in directory.glob("*.stdin"):
+            try:
+                details = candidate.lstat()
+            except FileNotFoundError:
+                continue
+            if details.st_uid == os.getuid() and details.st_mtime <= cutoff:
+                try:
+                    candidate.unlink()
+                except FileNotFoundError:
+                    pass
+        secret_id = uuid.uuid4().hex
+        path = directory / f"{secret_id}.stdin"
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+        )
+        try:
+            view = memoryview(payload)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError("short write while staging Longrun stdin")
+                view = view[written:]
+            os.fsync(descriptor)
+            details = os.fstat(descriptor)
+            if stat.S_IMODE(details.st_mode) != 0o600:
+                raise MemoryError(
+                    "Longrun stdin staging permissions are not 0600",
+                    code="longrun_secret_storage_invalid",
+                    category="security",
+                    phase="stage_longrun_secret",
+                )
+        except Exception:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            raise
+        finally:
+            os.close(descriptor)
+        return secret_id, ttl_sec
 
     def _upgrade_registry(self, registry: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(registry, dict) or not isinstance(registry.get("projects", {}), dict):
@@ -1990,6 +2119,95 @@ class ProjectMemory:
         result["project"] = entry["project_key"]
         return result
 
+    def stage_test_asset_for_longrun(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Stage one encrypted test-asset field as a one-time Longrun stdin handle."""
+        entry = self.resolve_project_args(args)
+        if not entry.get("allow_test_secrets"):
+            raise MemoryError(
+                "test-secret access is not allowed for this project",
+                code="test_secrets_disabled",
+                category="security",
+                phase="stage_longrun_secret",
+            )
+        record_id = require_text(args, "record_id", 100)
+        secret_field = require_text(args, "secret_field", 200)
+        append_newline = args.get("append_newline", True)
+        if not isinstance(append_newline, bool):
+            raise MemoryError("append_newline must be boolean", code="invalid_argument")
+        connection = self._connect(entry)
+        secret_id: str | None = None
+        try:
+            row = connection.execute(
+                "SELECT * FROM records WHERE id=? AND status='active'",
+                (record_id,),
+            ).fetchone()
+            if not row or row["kind"] != "test_asset" or row["secret_blob"] is None:
+                raise MemoryError(
+                    "active encrypted test asset not found",
+                    code="test_asset_required",
+                    category="security",
+                    phase="stage_longrun_secret",
+                )
+            public_payload = json.loads(row["payload_json"])
+            if public_payload.get("test_only") is not True:
+                raise MemoryError(
+                    "test asset is not explicitly test-only",
+                    code="test_only_required",
+                    category="security",
+                    phase="stage_longrun_secret",
+                )
+            secret_fields = self._decrypt(entry, row["secret_blob"])
+            if secret_field not in secret_fields:
+                raise MemoryError(
+                    "requested secret field is not present",
+                    code="secret_field_not_found",
+                    category="security",
+                    phase="stage_longrun_secret",
+                )
+            value = secret_fields[secret_field]
+            if not isinstance(value, (str, int, float, bool)):
+                raise MemoryError(
+                    "requested secret field is not a scalar",
+                    code="secret_field_invalid",
+                    category="security",
+                    phase="stage_longrun_secret",
+                )
+            payload = str(value).encode("utf-8")
+            if append_newline and not payload.endswith(b"\n"):
+                payload += b"\n"
+            secret_id, ttl_sec = self._stage_longrun_stdin(payload)
+            self._audit(
+                connection,
+                "stage_test_asset_for_longrun",
+                record_id,
+                {
+                    "approved_scope": "test_only",
+                    "target": "longrun_stdin",
+                    "secret_field_name": secret_field,
+                    "secret_value_returned": False,
+                },
+            )
+            connection.commit()
+            return {
+                "project": entry["project_key"],
+                "record_id": record_id,
+                "stdin_secret_id": secret_id,
+                "expires_in_sec": ttl_sec,
+                "single_use": True,
+                "output_suppression_required": True,
+                "secret_value_returned": False,
+            }
+        except Exception:
+            connection.rollback()
+            if secret_id is not None:
+                try:
+                    (self.longrun_state_dir / "secrets" / f"{secret_id}.stdin").unlink()
+                except FileNotFoundError:
+                    pass
+            raise
+        finally:
+            connection.close()
+
     def note_repetition(self, args: dict[str, Any]) -> dict[str, Any]:
         entry = self.resolve_project_args(args)
         problem = require_text(args, "problem")
@@ -2682,6 +2900,28 @@ TOOLS: list[dict[str, Any]] = [
         "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
     },
     {
+        "name": "project_memory_stage_test_asset_for_longrun",
+        "title": "Stage Test Credential For Longrun",
+        "description": (
+            "Decrypt one scalar field from an explicitly test-only asset and stage it locally as a "
+            "short-lived one-time Longrun stdin handle. The secret value is never returned."
+        ),
+        "inputSchema": tool_input(
+            {
+                "record_id": {"type": "string"},
+                "secret_field": {"type": "string"},
+                "append_newline": {"type": "boolean", "default": True},
+            },
+            ["record_id", "secret_field"],
+        ),
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
+    },
+    {
         "name": "project_memory_note_repetition",
         "title": "Note Repeated Action",
         "description": "Track another occurrence in one selected project while a final variant is still being sought.",
@@ -2850,6 +3090,7 @@ TOOL_OPERATIONS = {
     "project_memory_search": "read",
     "project_memory_get": "read",
     "project_memory_get_test_asset": "sensitive_read",
+    "project_memory_stage_test_asset_for_longrun": "sensitive_read",
     "project_memory_note_repetition": "write",
     "project_memory_finalize_solution": "edit",
     "project_memory_store_test_asset": "create",
@@ -2923,6 +3164,7 @@ def call_tool(memory: ProjectMemory, name: str, args: dict[str, Any]) -> dict[st
         "project_memory_search": memory.search,
         "project_memory_get": memory.get,
         "project_memory_get_test_asset": lambda value: memory.get(value, include_test_secrets=True),
+        "project_memory_stage_test_asset_for_longrun": memory.stage_test_asset_for_longrun,
         "project_memory_note_repetition": memory.note_repetition,
         "project_memory_finalize_solution": memory.finalize_solution,
         "project_memory_store_test_asset": memory.store_test_asset,
@@ -3030,7 +3272,7 @@ def serve(memory: ProjectMemory | None = None) -> None:
             request_id = message.get("id")
             if method == "initialize":
                 scope = f" Bound project: {memory.bound_project}." if memory.bound_project else " Pass the mapped hierarchical project key on every call."
-                send({"jsonrpc": "2.0", "id": request_id, "result": {"protocolVersion": message.get("params", {}).get("protocolVersion", PROTOCOL_VERSION), "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION}, "instructions": f"Use adaptive recall first, expand evidence only when coverage requires it, and remember only observed or verified knowledge.{scope} Active tool profile: {memory.profile}."}})
+                send({"jsonrpc": "2.0", "id": request_id, "result": {"protocolVersion": message.get("params", {}).get("protocolVersion", PROTOCOL_VERSION), "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION}, "instructions": f"Use adaptive recall first, expand evidence only when coverage requires it, and remember only observed or verified knowledge. For a reviewed Longrun command, stage an existing encrypted test-asset field with project_memory_stage_test_asset_for_longrun and pass only its one-time handle; do not reveal the plaintext or ask the user to re-enter an enrolled credential.{scope} Active tool profile: {memory.profile}."}})
             elif method == "ping":
                 send({"jsonrpc": "2.0", "id": request_id, "result": {}})
             elif method == "tools/list":

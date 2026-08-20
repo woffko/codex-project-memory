@@ -24,7 +24,11 @@ class ProjectMemoryTest(unittest.TestCase):
         root = Path(self.temporary.name)
         self.project = root / "project"
         self.project.mkdir()
-        self.memory = MODULE.ProjectMemory(root / "data", root / "config")
+        self.memory = MODULE.ProjectMemory(
+            root / "data",
+            root / "config",
+            longrun_state_dir=root / "longrun-state",
+        )
         self.entry = self.memory.enroll(str(self.project), "pilot", True, project_key="pilot")
         self.root_arg = {"project_root": str(self.project)}
 
@@ -53,10 +57,105 @@ class ProjectMemoryTest(unittest.TestCase):
         db_path = self.memory._db_path(self.entry)
         self.assertNotIn(credential_value.encode(), db_path.read_bytes())
 
+    def test_test_asset_secret_stages_as_handle_without_mcp_disclosure(self):
+        credential_value = "fixture-" + "longrun-password-987"
+        asset = self.memory.store_test_asset({
+            **self.root_arg,
+            "test_only": True,
+            "name": "Lab appliance",
+            "asset_type": "test appliance",
+            "endpoint": "192.0.2.20",
+            "username": "root",
+            "secret_fields": {"password": credential_value},
+        })
+        staged = MODULE.call_tool(
+            self.memory,
+            "project_memory_stage_test_asset_for_longrun",
+            {
+                **self.root_arg,
+                "record_id": asset["id"],
+                "secret_field": "password",
+            },
+        )
+        secret_id = staged["stdin_secret_id"]
+        self.assertRegex(secret_id, r"^[a-f0-9]{32}$")
+        self.assertFalse(staged["secret_value_returned"])
+        self.assertTrue(staged["output_suppression_required"])
+        path = self.memory.longrun_state_dir / "secrets" / f"{secret_id}.stdin"
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.read_bytes(), credential_value.encode() + b"\n")
+
+        database_bytes = self.memory._db_path(self.entry).read_bytes()
+        metrics_files = list(self.memory.metrics.path.parent.glob("usage.sqlite3*"))
+        metrics_bytes = b"".join(value.read_bytes() for value in metrics_files)
+        rendered = MODULE.compact_json(staged).encode()
+        self.assertNotIn(credential_value.encode(), database_bytes)
+        self.assertNotIn(credential_value.encode(), metrics_bytes)
+        self.assertNotIn(credential_value.encode(), rendered)
+        self.assertNotIn(secret_id.encode(), database_bytes)
+        self.assertNotIn(secret_id.encode(), metrics_bytes)
+        audit = self.memory._connect(self.entry)
+        detail = audit.execute(
+            "SELECT detail_json FROM audit WHERE action='stage_test_asset_for_longrun' "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0]
+        audit.close()
+        self.assertNotIn(credential_value, detail)
+        self.assertNotIn(secret_id, detail)
+
+        with self.assertRaises(MODULE.ReportedToolError):
+            MODULE.call_tool(
+                self.memory,
+                "project_memory_stage_test_asset_for_longrun",
+                {
+                    **self.root_arg,
+                    "record_id": asset["id"],
+                    "secret_field": "missing",
+                },
+            )
+
     def test_general_memory_rejects_credentials(self):
         with self.assertRaises(MODULE.MemoryError):
             sensitive_action = "use " + "password" + "=" + "fixture-value"
             self.memory.note_repetition({**self.root_arg, "problem": "login", "action": sensitive_action})
+
+    def test_longrun_staging_rolls_back_file_when_audit_fails(self):
+        asset = self.memory.store_test_asset({
+            **self.root_arg,
+            "test_only": True,
+            "name": "Audit fixture",
+            "asset_type": "test appliance",
+            "secret_fields": {"password": "audit-fixture-value"},
+        })
+        with patch.object(self.memory, "_audit", side_effect=RuntimeError("fixture audit failure")):
+            with self.assertRaises(RuntimeError):
+                self.memory.stage_test_asset_for_longrun({
+                    **self.root_arg,
+                    "record_id": asset["id"],
+                    "secret_field": "password",
+                })
+        secrets_dir = self.memory.longrun_state_dir / "secrets"
+        self.assertEqual(list(secrets_dir.glob("*.stdin")), [])
+
+    def test_longrun_staging_rejects_symlink_secret_directory(self):
+        asset = self.memory.store_test_asset({
+            **self.root_arg,
+            "test_only": True,
+            "name": "Symlink fixture",
+            "asset_type": "test appliance",
+            "secret_fields": {"password": "symlink-fixture-value"},
+        })
+        self.memory.longrun_state_dir.mkdir(parents=True, mode=0o700)
+        target = Path(self.temporary.name) / "unsafe-secrets"
+        target.mkdir()
+        (self.memory.longrun_state_dir / "secrets").symlink_to(target)
+        with self.assertRaises(MODULE.MemoryError):
+            self.memory.stage_test_asset_for_longrun({
+                **self.root_arg,
+                "record_id": asset["id"],
+                "secret_field": "password",
+            })
+        self.assertEqual(list(target.iterdir()), [])
 
     def test_unenrolled_checkout_is_rejected(self):
         other = Path(self.temporary.name) / "other"
