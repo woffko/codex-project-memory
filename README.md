@@ -1,8 +1,9 @@
 # Codex Project Memory
 
 Local, project-scoped operational memory for Codex, exposed through MCP. It
-helps Codex find previously completed procedures, track recurring attempts,
-and retain only a verified final solution.
+optimizes total context per correctly completed task: useful knowledge remains
+losslessly local, while adaptive recall returns only the complete action core
+and supporting evidence needed now.
 
 Each project's data lives outside Git. The plugin does not send records to an
 external service and does not place databases, encryption keys, or credentials
@@ -11,15 +12,37 @@ in the project repository.
 ## What it stores
 
 - recurring problems and candidate actions;
-- final solutions after at least two occurrences and successful verification;
+- verified solutions, constraints, decisions, failure patterns, environment
+  facts, and expiring continuation checkpoints;
+- materialized `card`, `action`, and `evidence` views plus bounded `full` reads;
 - stable log locations without copying raw logs;
 - explicitly test-only asset details, including encrypted credentials;
 - record revisions and a local audit trail;
 - local usage aggregates and sanitized error diagnostics.
 
-Search uses SQLite FTS5. Secret fields are encrypted with AES-256-GCM and are
-never added to the full-text index. Usage metrics never contain queries, tool
-arguments, project paths, record contents, record IDs, or credentials.
+Recall uses exact technical signals, weighted SQLite FTS5, relaxed lexical
+fallback, project scope, confidence, freshness, conflict state, and serialized
+cost. Optional local semantics are not required and no model is downloaded.
+Secret fields are encrypted with AES-256-GCM and are never added to ordinary
+views or indexes. Usage metrics never contain queries, tool arguments, project
+paths, record contents, record IDs, or credentials.
+
+## Adaptive retrieval
+
+`project_memory_recall` is the normal read entry point. It searches the active
+project and its declared parent in one call and selects one of four modes:
+
+- `compact`: a complete short action for an exact, safe match;
+- `balanced`: the action core plus material constraints or failures;
+- `deep`: evidence, rationale, conflicts, and diverse supporting records;
+- `auto`: deterministic selection based on match confidence, ambiguity, task
+  type, risk, completeness, and staleness.
+
+The preferred budget defaults to 3,000 estimated tokens and the maximum to
+8,000. UTF-8 bytes are the enforcement boundary because model tokenizers vary.
+Critical applicability, steps, constraints, warnings, verification, and
+version or device limits are not removed merely to hit the preferred target.
+Coverage and omission metadata state what remains locally available.
 
 ## Requirements
 
@@ -43,6 +66,16 @@ The installer creates an isolated Python runtime at
 marketplace, and installs the `project-memory` plugin. It does not create,
 replace, or modify any `AGENTS.md` or `AGENTS.override.md` file. Project routing
 remains an explicit, separate configuration step.
+
+Installation also runs the repeat-safe content migration for all enrolled
+projects. A schema-1 database is backed up as
+`projects/<id>/backups/pre-schema2-<timestamp>.sqlite3` before it is changed.
+Already migrated databases are left untouched and do not receive another
+backup. Existing IDs, hierarchy, encrypted blobs, revisions, audit history,
+metrics, and backup directories are preserved.
+An existing schema-1 `usage.sqlite3` is likewise backed up under
+`backups/usage-pre-schema2-<timestamp>.sqlite3` before aggregate columns are
+added.
 
 To register the marketplace directly from GitHub instead of keeping a local
 checkout:
@@ -187,6 +220,19 @@ project's `.codex/config.toml`. They keep reads and ordinary memory writes
 automatic, while requiring approval to store or reveal test-only credentials
 and to deprecate a record.
 
+The default server profile is `admin` for backward compatibility. Set
+`PROJECT_MEMORY_PROFILE=lean` to expose only recall, read, remember, and
+report-stale, or `compat` to add ordinary legacy tools without administrative
+statistics, deprecation, or secret operations. A narrowly scoped server can be
+bound to one enrolled key:
+
+```bash
+codex-project-memory serve --project Product/core --profile lean
+```
+
+Bound mode removes repeated project selectors from tool schemas and rejects
+cross-project requests. Multi-project mode remains the installation default.
+
 Project Memory routing belongs in the active workspace instructions; plugin
 installation does not change those files. Keep a portable mapping in an
 existing tracked `AGENTS.md` when that is appropriate for every checkout. If
@@ -248,29 +294,37 @@ which working directory to use.
 
 ## How a recurring action becomes a solution
 
-1. Codex calls `project_memory_status` and `project_memory_search` before
-   troubleshooting.
-2. A recurring problem or action is recorded with
-   `project_memory_note_repetition`.
-3. The server increments the matching candidate using a stable fingerprint.
-4. A candidate cannot become a solution before two occurrences are recorded.
-5. After a real successful check, Codex calls
-   `project_memory_finalize_solution` with the exact final steps, outcome, and
-   verification evidence.
-6. When a retrieved record is applied or found unsuitable, Codex calls
-   `project_memory_mark_used` with `reused`, `helpful`, `not_applicable`, or
-   `stale` so usage reports distinguish retrieval from actual reuse.
+1. Codex calls `project_memory_recall` before repeating troubleshooting.
+2. A real occurrence is stored through `project_memory_remember` with a stable
+   key and structured action fields.
+3. The server increments the candidate and moves the observation into an event,
+   outside the hot action payload.
+4. A candidate cannot become a solution before two qualifying occurrences.
+5. Complete verified evidence can automatically finalize the candidate. The
+   action view then contains applicability, steps, constraints, warnings,
+   verification, outcome, and version or device limits.
+6. Important failed approaches remain available in evidence view; ordinary
+   attempts, revisions, and audit history remain cold until explicitly read.
+7. Stale knowledge is reported with `project_memory_report_stale`, not deleted.
 
 Untested hypotheses and raw logs should never become final solutions.
+
+Other durable record kinds do not require artificial repetition: constraints,
+decisions, failure patterns, and environment facts can be stored once with
+their required structured fields and honest confidence. Checkpoints use a TTL
+and are returned only for continuation work.
 
 ## Local usage and error reports
 
 Every project-scoped MCP call updates local daily aggregates in
 `usage.sqlite3`. Probes, reads, creates, edits, reuse feedback, search hits,
-errors, active days, and approximate MCP server runs remain separate. A server
-run is not an exact Codex thread count because the MCP protocol does not supply
-a stable Codex session identifier. Successful `project_memory_stats` calls are
-not counted, avoiding an observer effect in the reported totals.
+errors, active days, and approximate MCP server runs remain separate. Schema 2
+also counts request and response bytes, estimated response tokens, returned
+cards/actions/evidence, full reads, recall/read round trips, direct actions,
+quality-budget expansion, maximum-budget events, and parent searches. These
+are aggregate counters only. A server run is not an exact Codex thread count
+because MCP does not supply a stable Codex session identifier. Successful
+`project_memory_stats` calls are not counted, avoiding an observer effect.
 
 The dedicated reporter opens metrics in SQLite read-only mode and never opens
 project content databases or decrypts records:
@@ -315,6 +369,10 @@ memory but are not authentication credentials.
 
 | Tool | Purpose |
 | --- | --- |
+| `project_memory_recall` | Parent-aware adaptive retrieval with budgets, quality gates, conflicts, and coverage |
+| `project_memory_read` | Expand one record to `card`, `action`, `evidence`, or bounded `full` |
+| `project_memory_remember` | Store occurrences, structured knowledge, failures, checkpoints, relations, or feedback |
+| `project_memory_report_stale` | Preserve but down-rank knowledge that no longer applies |
 | `project_memory_status` | Confirm enrollment and show counts plus parent/child routing |
 | `project_memory_search` | Search one selected project's records without secrets |
 | `project_memory_get` | Read a normal record from one selected project |
@@ -326,6 +384,20 @@ memory but are not authentication credentials.
 | `project_memory_get_test_asset` | Reveal encrypted fields with approval |
 | `project_memory_mark_used` | Mark a retrieved record as reused, helpful, unsuitable, or stale |
 | `project_memory_deprecate` | Soft-deprecate an obsolete record |
+
+The first four tools form the `lean` profile. `compat` also exposes ordinary
+legacy tools. `admin` exposes every tool, including statistics, deprecation,
+and approval-gated test-secret operations. Legacy calls retain their original
+arguments and project-root behavior.
+
+Representative MCP arguments:
+
+```json
+{"project":"Product/core","query":"E521 after interrupted turn","mode":"auto","risk":"normal"}
+{"project":"Product/core","record_id":"7f2a","view":"evidence","max_tokens":8000}
+{"project":"Product/core","operation":"checkpoint","stable_key":"retrieval-upgrade","goal":"finish retrieval","completed":["schema"],"current_state":"ranking untested","next_steps":["benchmark"],"blockers":[],"branch":"deepdive","head_commit":"a1b2c3d","expires_at":"2026-09-03T00:00:00Z"}
+{"project":"Product/core","record_id":"7f2a","reason":"watched implementation changed","state":"possibly_stale"}
+```
 
 ## Connect only the MCP server
 
@@ -365,6 +437,25 @@ Create a consistent SQLite backup:
 
 `backup --project-root /path/to/project` remains available for legacy scripts.
 
+Migrate one project or every enrolled database explicitly:
+
+```bash
+~/.local/share/codex-project-memory/runtime/bin/codex-project-memory migrate \
+  --project Product/core
+
+~/.local/share/codex-project-memory/runtime/bin/codex-project-memory migrate --all
+```
+
+### Content schema migration
+
+Content schema 2 adds events, relations, materialized views, completeness,
+importance, confidence, provenance, staleness, supersedence, checkpoints, and
+Git watch metadata. Migration is transactional and repeat-safe. Legacy
+observations and attempt history move into events exactly once, and the old
+record revision is saved before its hot payload is rewritten. Missing legacy
+fields remain explicitly incomplete; they are never fabricated merely to pass
+the direct-action gate. Secret blobs are neither decrypted nor rewritten.
+
 ### Registry migration
 
 Registry schema 1 and 2 entries are upgraded to schema 3 when read and
@@ -400,11 +491,35 @@ codex plugin add project-memory@codex-project-memory
 Start a new Codex thread after updating so the refreshed skill and MCP tool
 definitions are loaded.
 
+## Quality and cost benchmark
+
+Run the bundled deterministic fixture across the legacy workflow and every
+recall mode:
+
+```bash
+~/.local/share/codex-project-memory/runtime/bin/codex-project-memory-bench \
+  --queries plugins/project-memory/testdata/recall_cases.json \
+  --compare legacy,compact,balanced,auto,deep
+```
+
+The report includes hit@1, hit@3, labeled completion rate, mandatory-field
+coverage, direct-action rate, average and p95 response bytes, estimated tokens,
+tool calls, and per-case details. Query text and expected record identity exist
+only in the explicit benchmark input/output; passive metrics never store them.
+Use your own labeled cases with `--project PROJECT_KEY --queries FILE` when the
+file has no fixture records. Do not claim token or quality improvements from
+response size alone.
+
+See [`BENCHMARK.md`](BENCHMARK.md) for the checked-in v0.5.0 fixture result and
+its limitations.
+
 ## Development checks
 
 ```bash
 python3 plugins/project-memory/scripts/test_project_memory.py
 python3 plugins/project-memory/scripts/test_project_memory_metrics.py
+python3 plugins/project-memory/scripts/test_project_memory_adaptive.py
+python3 plugins/project-memory/scripts/test_project_memory_benchmark.py
 python3 /path/to/plugin-creator/scripts/validate_plugin.py plugins/project-memory
 ```
 

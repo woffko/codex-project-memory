@@ -47,6 +47,32 @@ Same-root logical projects are an organizational routing boundary, not an
 access-control boundary; use separate OS accounts or storage homes when hard
 isolation is required.
 
+Project-bound mode (`serve --project KEY` or `PROJECT_MEMORY_PROJECT=KEY`)
+narrows one server process to a single enrolled key, removes selectors from its
+tool schemas, and rejects attempts to target another key or root. It reduces
+routing mistakes but is not an OS-level boundary.
+
+## Materialized views and history
+
+`card_json`, `action_json`, and `evidence_json` are deterministic projections
+of ordinary structured fields. They never contain `secret_blob` data. View
+generation runs the same credential-pattern rejection used by ordinary writes;
+a failing view update rolls back the record transaction.
+
+Occurrence, failed-attempt, verification, feedback, supersedence, staleness,
+expiry, checkpoint, and migration events remain in each project's private
+database. Normal recall excludes cold history, revisions, and audit details.
+Full reads remain local and still cannot reveal encrypted test-asset fields.
+Provenance must be bounded metadata, never raw logs, full command output,
+credentials, personal data, or arbitrary repository contents.
+
+Git-aware freshness stores only explicitly supplied relative watch paths,
+working-tree blob hashes, and an optional commit identity. Secret-like paths
+such as `.env`, private-key names, and key containers are rejected. Derived
+repository context and optional local semantic indexing are not enabled in the
+current default implementation; if added later, they must remain rebuildable,
+local, opt-in, and secret-excluding.
+
 ## Local usage diagnostics
 
 Usage collection is local and enabled by default. Set
@@ -56,9 +82,12 @@ separate, and the dedicated report executable opens only the registry and
 usage database in read-only mode.
 
 Daily aggregates retain the stable project ID, tool name, operation class,
-success flag, counts, search result counts, duration totals, and first/last
-timestamps. They do not retain project paths or keys, tool arguments, search
-queries, record IDs, record contents, exception messages, logs, or credentials.
+success flag, counts, search result counts, duration totals, first/last
+timestamps, request/response byte totals, estimated response-token totals,
+view counts, recall/read counts, direct-action counts, and budget/parent-search
+counts. They do not retain project paths or keys, tool arguments, search
+queries, record IDs, record contents, Git file names, exception messages, logs,
+or credentials.
 
 Sanitized error events use a 90-day retention window and expired events are
 pruned when the next error is recorded. They contain an error ID, project ID
@@ -83,8 +112,25 @@ credential patterns. Credentials are accepted only by the dedicated
 2. the call explicitly sets `test_only: true`.
 
 Secret fields are encrypted with AES-256-GCM and are omitted from FTS indexes,
-ordinary search results, revisions, and normal record reads. Decryption uses a
-separate tool so Codex can apply an explicit approval rule.
+ordinary and semantic indexes, materialized views, events, relations, metrics,
+checkpoints, provenance, derived context, exception messages, revisions, and
+normal record reads. Decryption uses a separate tool so Codex can apply an
+explicit approval rule.
+
+Schema migration never decrypts or rewrites encrypted blobs. Before a schema-1
+content database is migrated, the installer creates a consistent mode-`0600`
+SQLite backup. Migration is transactional after schema scaffolding and writes
+the new version marker only after record conversion and view rebuilding
+succeed.
+
+## Benchmark boundary
+
+Passive metrics never infer correctness. The benchmark reads an explicit,
+user-selected labeled JSON file and may contain queries and expected record
+identity in its process memory and output. Bundled fixtures run in a temporary
+storage home. When benchmarking a real project, treat the input and output as
+private project artifacts and do not commit them unless they are intentionally
+sanitized.
 
 Encryption protects a copied database without its key. It does not protect
 against compromise of the same OS account, a malicious process running as the

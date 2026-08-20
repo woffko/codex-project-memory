@@ -19,6 +19,11 @@ python3 -m venv "$runtime_root"
 "$runtime_root/bin/python" -m pip install --upgrade pip
 "$runtime_root/bin/python" -m pip install --upgrade "$plugin_root"
 
+# Upgrade project content databases only after making per-project SQLite backups.
+# This command is repeat-safe and reports unchanged schema-2 databases without
+# creating another backup.
+"$runtime_root/bin/codex-project-memory" migrate --all
+
 if ! codex plugin marketplace list 2>/dev/null | grep -q 'codex-project-memory'; then
     codex plugin marketplace add "$repo_root"
 fi
@@ -31,6 +36,8 @@ echo "Add a child from an enrolled parent with:"
 echo "  $runtime_root/bin/codex-project-memory enroll --subproject RELATIVE-PATH"
 echo "View local usage and sanitized errors with:"
 echo "  $runtime_root/bin/codex-project-memory-report summary --all --since 30d"
+echo "Run the local quality-and-cost benchmark with:"
+echo "  $runtime_root/bin/codex-project-memory-bench --queries PATH/TO/recall_cases.json"
 echo "The installer did not create or modify AGENTS.md or AGENTS.override.md."
 echo
 echo "Add --allow-test-secrets only for projects that may store credentials for explicitly test-only assets."

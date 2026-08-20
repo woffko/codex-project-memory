@@ -13,7 +13,7 @@ from typing import Any, Iterable
 from urllib.parse import quote
 
 
-METRICS_SCHEMA_VERSION = 1
+METRICS_SCHEMA_VERSION = 2
 ERROR_RETENTION_DAYS = 90
 UNKNOWN_PROJECT_ID = ""
 
@@ -71,6 +71,7 @@ class MetricsStore:
         self._initialized = False
         self._pruned_errors = False
         self._writer: sqlite3.Connection | None = None
+        self.last_migration_backup: str | None = None
 
     def _secure_parent(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -182,16 +183,58 @@ class MetricsStore:
         row = connection.execute(
             "SELECT value FROM metrics_metadata WHERE key='schema_version'"
         ).fetchone()
-        if row is not None and int(row["value"]) != METRICS_SCHEMA_VERSION:
-            raise sqlite3.DatabaseError(
-                f"usage metrics schema {row['value']} is not supported by schema {METRICS_SCHEMA_VERSION}"
+        version = int(row["value"]) if row is not None else METRICS_SCHEMA_VERSION
+        if row is not None and version < METRICS_SCHEMA_VERSION:
+            backup_dir = self.path.parent / "backups"
+            backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            backup_dir.chmod(0o700)
+            stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            destination = backup_dir / f"usage-pre-schema{METRICS_SCHEMA_VERSION}-{stamp}.sqlite3"
+            suffix = 1
+            while destination.exists():
+                destination = backup_dir / f"usage-pre-schema{METRICS_SCHEMA_VERSION}-{stamp}-{suffix}.sqlite3"
+                suffix += 1
+            backup_connection = sqlite3.connect(destination)
+            try:
+                connection.backup(backup_connection)
+            finally:
+                backup_connection.close()
+            destination.chmod(0o600)
+            self.last_migration_backup = str(destination)
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            if version > METRICS_SCHEMA_VERSION:
+                raise sqlite3.DatabaseError(
+                    f"usage metrics schema {version} is not supported by schema {METRICS_SCHEMA_VERSION}"
+                )
+            columns = {value["name"] for value in connection.execute("PRAGMA table_info(usage_daily)")}
+            additions = {
+            "request_argument_bytes": "INTEGER NOT NULL DEFAULT 0",
+            "response_bytes": "INTEGER NOT NULL DEFAULT 0",
+            "estimated_response_tokens": "INTEGER NOT NULL DEFAULT 0",
+            "cards_returned": "INTEGER NOT NULL DEFAULT 0",
+            "action_records_returned": "INTEGER NOT NULL DEFAULT 0",
+            "evidence_records_returned": "INTEGER NOT NULL DEFAULT 0",
+            "full_reads": "INTEGER NOT NULL DEFAULT 0",
+            "recall_calls": "INTEGER NOT NULL DEFAULT 0",
+            "followup_read_calls": "INTEGER NOT NULL DEFAULT 0",
+            "direct_action_calls": "INTEGER NOT NULL DEFAULT 0",
+            "target_budget_exceeded_calls": "INTEGER NOT NULL DEFAULT 0",
+            "maximum_budget_reached_calls": "INTEGER NOT NULL DEFAULT 0",
+            "parent_search_calls": "INTEGER NOT NULL DEFAULT 0",
+            }
+            for name, definition in additions.items():
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE usage_daily ADD COLUMN {name} {definition}")
+            connection.execute(
+                "INSERT INTO metrics_metadata(key,value) VALUES('schema_version',?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(METRICS_SCHEMA_VERSION),),
             )
-        connection.execute(
-            "INSERT INTO metrics_metadata(key,value) VALUES('schema_version',?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (str(METRICS_SCHEMA_VERSION),),
-        )
-        connection.commit()
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
 
     def record_call(
         self,
@@ -202,6 +245,9 @@ class MetricsStore:
         success: bool,
         duration_us: int,
         result_items: int = 0,
+        request_argument_bytes: int = 0,
+        response_bytes: int = 0,
+        response_details: dict[str, Any] | None = None,
         error: dict[str, str | None] | None = None,
     ) -> str | None:
         if not self.enabled:
@@ -210,19 +256,51 @@ class MetricsStore:
         day = now[:10]
         normalized_project_id = project_id or UNKNOWN_PROJECT_ID
         error_id = str(uuid.uuid4()) if error is not None else None
-        hit = int(tool == "project_memory_search" and success and result_items > 0)
+        hit = int(tool in {"project_memory_search", "project_memory_recall"} and success and result_items > 0)
+        details = response_details or {}
+        estimated_tokens = max(0, int(details.get("estimated_tokens", 0)))
+        counters = {
+            "cards_returned": max(0, int(details.get("cards_returned", 0))),
+            "action_records_returned": max(0, int(details.get("action_records_returned", 0))),
+            "evidence_records_returned": max(0, int(details.get("evidence_records_returned", 0))),
+            "full_reads": int(bool(details.get("full_read", False))),
+            "recall_calls": int(tool == "project_memory_recall" and success),
+            "followup_read_calls": int(tool == "project_memory_read" and success),
+            "direct_action_calls": int(bool(details.get("direct_action", False))),
+            "target_budget_exceeded_calls": int(bool(details.get("target_exceeded_for_quality", False))),
+            "maximum_budget_reached_calls": int(bool(details.get("maximum_reached", False))),
+            "parent_search_calls": int(bool(details.get("parent_search", False))),
+        }
         connection = self._write_connection()
         try:
+            usage_values = ",".join(["?"] * 5 + ["1"] + ["?"] * 18)
             connection.execute(
-                """INSERT INTO usage_daily(
+                f"""INSERT INTO usage_daily(
                        day,project_id,tool,operation,success,calls,result_items,hits,
-                       total_duration_us,first_call_at,last_call_at
-                   ) VALUES(?,?,?,?,?,1,?,?,?,?,?)
+                       total_duration_us,first_call_at,last_call_at,request_argument_bytes,
+                       response_bytes,estimated_response_tokens,cards_returned,
+                       action_records_returned,evidence_records_returned,full_reads,recall_calls,
+                       followup_read_calls,direct_action_calls,target_budget_exceeded_calls,
+                       maximum_budget_reached_calls,parent_search_calls
+                   ) VALUES({usage_values})
                    ON CONFLICT(day,project_id,tool,operation,success) DO UPDATE SET
                        calls=usage_daily.calls+1,
                        result_items=usage_daily.result_items+excluded.result_items,
                        hits=usage_daily.hits+excluded.hits,
                        total_duration_us=usage_daily.total_duration_us+excluded.total_duration_us,
+                       request_argument_bytes=usage_daily.request_argument_bytes+excluded.request_argument_bytes,
+                       response_bytes=usage_daily.response_bytes+excluded.response_bytes,
+                       estimated_response_tokens=usage_daily.estimated_response_tokens+excluded.estimated_response_tokens,
+                       cards_returned=usage_daily.cards_returned+excluded.cards_returned,
+                       action_records_returned=usage_daily.action_records_returned+excluded.action_records_returned,
+                       evidence_records_returned=usage_daily.evidence_records_returned+excluded.evidence_records_returned,
+                       full_reads=usage_daily.full_reads+excluded.full_reads,
+                       recall_calls=usage_daily.recall_calls+excluded.recall_calls,
+                       followup_read_calls=usage_daily.followup_read_calls+excluded.followup_read_calls,
+                       direct_action_calls=usage_daily.direct_action_calls+excluded.direct_action_calls,
+                       target_budget_exceeded_calls=usage_daily.target_budget_exceeded_calls+excluded.target_budget_exceeded_calls,
+                       maximum_budget_reached_calls=usage_daily.maximum_budget_reached_calls+excluded.maximum_budget_reached_calls,
+                       parent_search_calls=usage_daily.parent_search_calls+excluded.parent_search_calls,
                        first_call_at=min(usage_daily.first_call_at,excluded.first_call_at),
                        last_call_at=max(usage_daily.last_call_at,excluded.last_call_at)""",
                 (
@@ -236,6 +314,19 @@ class MetricsStore:
                     max(0, int(duration_us)),
                     now,
                     now,
+                    max(0, int(request_argument_bytes)),
+                    max(0, int(response_bytes)),
+                    estimated_tokens,
+                    counters["cards_returned"],
+                    counters["action_records_returned"],
+                    counters["evidence_records_returned"],
+                    counters["full_reads"],
+                    counters["recall_calls"],
+                    counters["followup_read_calls"],
+                    counters["direct_action_calls"],
+                    counters["target_budget_exceeded_calls"],
+                    counters["maximum_budget_reached_calls"],
+                    counters["parent_search_calls"],
                 ),
             )
             connection.execute(
@@ -312,6 +403,19 @@ class MetricsStore:
             "searches": 0,
             "search_hits": 0,
             "search_result_items": 0,
+            "request_argument_bytes": 0,
+            "response_bytes": 0,
+            "estimated_response_tokens": 0,
+            "cards_returned": 0,
+            "action_records_returned": 0,
+            "evidence_records_returned": 0,
+            "full_reads": 0,
+            "recall_calls": 0,
+            "followup_read_calls": 0,
+            "direct_action_calls": 0,
+            "target_budget_exceeded_calls": 0,
+            "maximum_budget_reached_calls": 0,
+            "parent_search_calls": 0,
             "active_days": 0,
             "server_runs": 0,
             "average_duration_ms": 0.0,
@@ -341,9 +445,22 @@ class MetricsStore:
                          sum(CASE WHEN operation='stale' AND success=1 THEN calls ELSE 0 END) AS stale,
                          sum(CASE WHEN operation IN ('helpful','not_applicable','stale') AND success=1 THEN calls ELSE 0 END) AS feedback,
                          sum(CASE WHEN success=0 THEN calls ELSE 0 END) AS errors,
-                         sum(CASE WHEN tool='project_memory_search' AND success=1 THEN calls ELSE 0 END) AS searches,
-                         sum(CASE WHEN tool='project_memory_search' AND success=1 THEN hits ELSE 0 END) AS search_hits,
-                         sum(CASE WHEN tool='project_memory_search' AND success=1 THEN result_items ELSE 0 END) AS search_result_items,
+                         sum(CASE WHEN tool IN ('project_memory_search','project_memory_recall') AND success=1 THEN calls ELSE 0 END) AS searches,
+                         sum(CASE WHEN tool IN ('project_memory_search','project_memory_recall') AND success=1 THEN hits ELSE 0 END) AS search_hits,
+                         sum(CASE WHEN tool IN ('project_memory_search','project_memory_recall') AND success=1 THEN result_items ELSE 0 END) AS search_result_items,
+                         sum(request_argument_bytes) AS request_argument_bytes,
+                         sum(response_bytes) AS response_bytes,
+                         sum(estimated_response_tokens) AS estimated_response_tokens,
+                         sum(cards_returned) AS cards_returned,
+                         sum(action_records_returned) AS action_records_returned,
+                         sum(evidence_records_returned) AS evidence_records_returned,
+                         sum(full_reads) AS full_reads,
+                         sum(recall_calls) AS recall_calls,
+                         sum(followup_read_calls) AS followup_read_calls,
+                         sum(direct_action_calls) AS direct_action_calls,
+                         sum(target_budget_exceeded_calls) AS target_budget_exceeded_calls,
+                         sum(maximum_budget_reached_calls) AS maximum_budget_reached_calls,
+                         sum(parent_search_calls) AS parent_search_calls,
                          count(DISTINCT day) AS active_days,
                          sum(total_duration_us) AS total_duration_us,
                          min(first_call_at) AS first_used_at,
@@ -382,6 +499,19 @@ class MetricsStore:
                     "searches": int(row["searches"] or 0),
                     "search_hits": int(row["search_hits"] or 0),
                     "search_result_items": int(row["search_result_items"] or 0),
+                    "request_argument_bytes": int(row["request_argument_bytes"] or 0),
+                    "response_bytes": int(row["response_bytes"] or 0),
+                    "estimated_response_tokens": int(row["estimated_response_tokens"] or 0),
+                    "cards_returned": int(row["cards_returned"] or 0),
+                    "action_records_returned": int(row["action_records_returned"] or 0),
+                    "evidence_records_returned": int(row["evidence_records_returned"] or 0),
+                    "full_reads": int(row["full_reads"] or 0),
+                    "recall_calls": int(row["recall_calls"] or 0),
+                    "followup_read_calls": int(row["followup_read_calls"] or 0),
+                    "direct_action_calls": int(row["direct_action_calls"] or 0),
+                    "target_budget_exceeded_calls": int(row["target_budget_exceeded_calls"] or 0),
+                    "maximum_budget_reached_calls": int(row["maximum_budget_reached_calls"] or 0),
+                    "parent_search_calls": int(row["parent_search_calls"] or 0),
                     "active_days": int(row["active_days"] or 0),
                     "server_runs": runs.get(project_id, 0),
                     "average_duration_ms": round(

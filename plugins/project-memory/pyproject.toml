@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-project-memory"
-version = "0.4.0"
-description = "Local multi-scope project memory with private usage diagnostics for Codex"
+version = "0.5.0"
+description = "Local adaptive project memory with quality-preserving retrieval for Codex"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -25,9 +25,10 @@ Repository = "https://github.com/woffko/codex-project-memory"
 [project.scripts]
 codex-project-memory = "project_memory_mcp:main"
 codex-project-memory-report = "project_memory_report:main"
+codex-project-memory-bench = "project_memory_bench:main"
 
 [tool.setuptools]
-py-modules = ["project_memory_mcp", "project_memory_metrics", "project_memory_report"]
+py-modules = ["project_memory_mcp", "project_memory_metrics", "project_memory_report", "project_memory_views", "project_memory_bench"]
 
 [tool.setuptools.package-dir]
 "" = "scripts"

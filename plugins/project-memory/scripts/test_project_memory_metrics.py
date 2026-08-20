@@ -6,6 +6,7 @@ import errno
 import io
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -251,6 +252,69 @@ class ProjectMemoryMetricsTest(unittest.TestCase):
         module.call_tool(memory, "project_memory_status", {"project": "disabled"})
         self.assertFalse(memory.metrics.enabled)
         self.assertFalse(memory.metrics.path.exists())
+
+    def test_adaptive_cost_counters_are_aggregate_only(self):
+        solution_args = {
+            "project": "pilot",
+            "operation": "occurrence",
+            "stable_key": "verified-queue",
+            "problem": "queue stalls",
+            "context": "fixture",
+            "action": ["restart queue"],
+            "applicability": {"scope": "fixture", "versions": ["v1"], "devices": []},
+            "constraints": [],
+            "warnings": [],
+            "verification": ["traffic passed"],
+            "outcome": "stable",
+        }
+        self.call("project_memory_remember", **{key: value for key, value in solution_args.items() if key != "project"})
+        solution = self.call("project_memory_remember", **{**{key: value for key, value in solution_args.items() if key != "project"}, "verified": True})
+        self.call("project_memory_recall", query="verified-queue")
+        self.call("project_memory_read", record_id=solution["id"], view="full")
+        usage = self.memory.metrics_report(project="pilot", since_days=30)["projects"][0]
+        self.assertEqual(usage["recall_calls"], 1)
+        self.assertEqual(usage["followup_read_calls"], 1)
+        self.assertEqual(usage["full_reads"], 1)
+        self.assertGreater(usage["request_argument_bytes"], 0)
+        self.assertGreater(usage["response_bytes"], 0)
+        metrics_bytes = b"".join(path.read_bytes() for path in self.memory.metrics.path.parent.glob("usage.sqlite3*"))
+        self.assertNotIn(solution["id"].encode(), metrics_bytes)
+        self.assertNotIn(b"verified-queue", metrics_bytes)
+
+    def test_metrics_schema_one_migrates_without_losing_aggregates(self):
+        path = Path(self.temporary.name) / "legacy-usage.sqlite3"
+        connection = sqlite3.connect(path)
+        connection.executescript(
+            """
+            CREATE TABLE metrics_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            INSERT INTO metrics_metadata VALUES('schema_version','1');
+            CREATE TABLE usage_daily(
+                day TEXT NOT NULL,project_id TEXT NOT NULL,tool TEXT NOT NULL,operation TEXT NOT NULL,
+                success INTEGER NOT NULL,calls INTEGER NOT NULL DEFAULT 0,result_items INTEGER NOT NULL DEFAULT 0,
+                hits INTEGER NOT NULL DEFAULT 0,total_duration_us INTEGER NOT NULL DEFAULT 0,
+                first_call_at TEXT NOT NULL,last_call_at TEXT NOT NULL,
+                PRIMARY KEY(day,project_id,tool,operation,success)
+            );
+            CREATE TABLE usage_runs(day TEXT NOT NULL,project_id TEXT NOT NULL,server_run_id TEXT NOT NULL,calls INTEGER NOT NULL DEFAULT 0,first_call_at TEXT NOT NULL,last_call_at TEXT NOT NULL,PRIMARY KEY(day,project_id,server_run_id));
+            CREATE TABLE error_events(error_id TEXT PRIMARY KEY,occurred_at TEXT NOT NULL,project_id TEXT NOT NULL,tool TEXT NOT NULL,operation TEXT NOT NULL,category TEXT NOT NULL,phase TEXT NOT NULL,error_code TEXT NOT NULL,exception_type TEXT NOT NULL,system_code TEXT,fingerprint TEXT NOT NULL,server_version TEXT NOT NULL);
+            """
+        )
+        today = module.utc_now()
+        connection.execute(
+            "INSERT INTO usage_daily VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (today[:10], "legacy", "project_memory_search", "read", 1, 2, 1, 1, 1000, today, today),
+        )
+        connection.commit()
+        connection.close()
+        store = module.MetricsStore(path, module.SERVER_VERSION)
+        store.record_call(project_id="legacy", tool="project_memory_recall", operation="recall", success=True, duration_us=10, result_items=1, response_bytes=120, response_details={"estimated_tokens": 40, "cards_returned": 1})
+        row = store.summary(["legacy"], 30)[0]
+        self.assertEqual(row["total_calls"], 3)
+        self.assertEqual(row["recall_calls"], 1)
+        self.assertEqual(row["response_bytes"], 120)
+        self.assertIsNotNone(store.last_migration_backup)
+        self.assertTrue(Path(store.last_migration_backup).exists())
+        store.close()
 
 
 if __name__ == "__main__":

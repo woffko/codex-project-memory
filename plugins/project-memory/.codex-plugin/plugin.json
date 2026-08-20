@@ -1,7 +1,7 @@
 {
   "name": "project-memory",
-  "version": "0.4.0",
-  "description": "Local multi-scope project memory with private usage and error diagnostics.",
+  "version": "0.5.0",
+  "description": "Local adaptive project memory with quality-preserving retrieval and private diagnostics.",
   "author": {
     "name": "woffko",
     "url": "https://github.com/woffko"
@@ -19,8 +19,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Project Memory",
-    "shortDescription": "Remember verified project and component procedures locally.",
-    "longDescription": "Routes recurring actions and verified solutions through hierarchical project keys, including independent memories at one repository root, with local-only usage aggregates, sanitized error diagnostics, and a read-only report tool.",
+    "shortDescription": "Recall complete verified project knowledge with adaptive context.",
+    "longDescription": "Retains lossless local project knowledge while returning bounded cards, actions, or evidence according to task confidence, scope, risk, and response budget.",
     "developerName": "woffko",
     "category": "Productivity",
     "capabilities": [
@@ -28,9 +28,9 @@
       "Write"
     ],
     "defaultPrompt": [
-      "Search project memory before troubleshooting.",
-      "Route this task to its mapped subproject and shared parent memory.",
-      "Record this repeated action and verified outcome."
+      "Recall the best verified procedure for this task.",
+      "Expand evidence for this ambiguous project decision.",
+      "Remember this verified solution and its constraints."
     ]
   },
   "mcpServers": "./.mcp.json"

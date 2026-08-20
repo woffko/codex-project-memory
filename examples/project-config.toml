@@ -1,10 +1,18 @@
 # Place these tables in a trusted project's .codex/config.toml.
-# Read/search and ordinary memory writes are automatic. Storing or revealing
-# test-only credentials and deprecating records require explicit approval.
+# Adaptive recall/read and ordinary non-secret writes are automatic. This lean
+# allowlist removes legacy/admin tools from normal model context. Remove the
+# enabled_tools list when an admin-profile session must use the prompt-gated
+# test-secret or deprecation tools below.
 
 [plugins."project-memory".mcp_servers.project_memory]
 enabled = true
 default_tools_approval_mode = "auto"
+enabled_tools = [
+  "project_memory_recall",
+  "project_memory_read",
+  "project_memory_remember",
+  "project_memory_report_stale",
+]
 
 [plugins."project-memory".mcp_servers.project_memory.tools.project_memory_store_test_asset]
 approval_mode = "prompt"
