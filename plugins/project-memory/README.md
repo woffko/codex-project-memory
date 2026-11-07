@@ -20,8 +20,9 @@ stdin handle without receiving the plaintext. The manual
 enrolled.
 
 In Claude Code, the SessionStart hook in `claude/hooks.json` adds the
-registry mapping for the session directory to the context; it reads only the
-registry. Install with:
+registry mapping for the session directory to the context, offers enrollment
+for an unenrolled Git repository, and on resume or compaction recalls the keys
+and checkpoints the session already used. It opens no project database. Install with:
 
 ```bash
 /plugin install project-memory --marketplace woffko/codex-project-memory
@@ -68,4 +69,5 @@ python3 scripts/test_project_memory_metrics.py
 python3 scripts/test_project_memory_adaptive.py
 python3 scripts/test_project_memory_benchmark.py
 python3 scripts/test_project_memory_route.py
+python3 scripts/test_project_memory_sessions.py
 ```

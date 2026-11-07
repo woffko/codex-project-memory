@@ -42,12 +42,34 @@ extends, `AGENTS.md`, so it must preserve all guidance required from that
 directory. Do not store credentials in any Codex instruction file.
 
 Claude Code does not read `AGENTS.override.md`. Its plugin adds a SessionStart
-hook that runs `codex-project-memory route`, which reads only the registry and
-places the matching project keys and roots (or, above enrolled roots, up to 40
+hook that runs `codex-project-memory route`, which reads the registry and the
+enrollment-decline list and places the matching project keys and roots (or, above enrolled roots, up to 40
 enrolled roots and keys below the session directory) in the model context. It
 opens no content database, key, or metrics store, and it reports failures only
 by exception class. The note is routing guidance with the same non-authorizing
 status as instruction files.
+
+The enrollment offer for an unenrolled Git repository only suggests a
+command; enrollment still runs only when the user agrees. Declined roots are
+kept in `route-declined.json` (mode `0600`) in the data home.
+
+## Host session state
+
+With Claude Code, the server and hook keep session state under
+`sessions/` in the data home (directory `0700`, files `0600`):
+`pid-<pid>.json` maps a Claude Code process to its current session ID, and
+`session-<id>.json` holds the project keys that session used, call and write
+counts, timestamps, and the record ID and stable key of its last checkpoint.
+These files never contain queries, tool arguments, record contents, paths
+other than file names, or credentials. Session files expire after 30 days, and
+pointers of exited processes are removed at the next session start. Audit
+events in project databases also store the writing session's ID. Session IDs
+are local identifiers, not secrets, and are never added to usage metrics. Set
+`PROJECT_MEMORY_SESSIONS=0` to disable all of it.
+
+A process that can write the data home can forge a pointer and misattribute
+later writes; this has the same same-OS-account trust boundary as the rest of
+the storage.
 
 Child sessions should search their selected child memory and declared parent
 memory separately. Sibling memory is not implicitly searched or exposed.

@@ -13,6 +13,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import stat
@@ -26,6 +27,7 @@ from typing import Any
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from project_memory_metrics import MetricsStore
+from project_memory_sessions import EnrollmentDeclines, SessionState, valid_session_id
 from project_memory_views import (
     CONFIDENCE_VALUES,
     IMPORTANCE_VALUES,
@@ -259,6 +261,8 @@ class ProjectMemory:
         )
         self.longrun_state_dir = (longrun_state_dir or default_longrun_state).expanduser().resolve()
         self.metrics = MetricsStore(self.data_home / "usage.sqlite3", SERVER_VERSION)
+        self.sessions = SessionState(self.data_home)
+        self.declines = EnrollmentDeclines(self.data_home)
         selected_profile = (profile or os.environ.get("PROJECT_MEMORY_PROFILE", "admin")).strip().casefold()
         if selected_profile not in PROFILE_VALUES:
             raise MemoryError(
@@ -900,12 +904,26 @@ class ProjectMemory:
             phase="resolve_project",
         )
 
+    def cli_command(self) -> str:
+        runtime = self.data_home / "runtime" / "bin" / "codex-project-memory"
+        return str(runtime) if runtime.exists() else "codex-project-memory"
+
+    @staticmethod
+    def repository_root(path: Path) -> str | None:
+        """Nearest ancestor that contains `.git`, excluding `/` and the home directory."""
+        excluded = {Path("/"), Path.home().resolve()}
+        for candidate in (path, *path.parents):
+            if (candidate / ".git").exists():
+                return None if candidate in excluded else str(candidate)
+        return None
+
     def route(self, path: str | None = None, descendant_limit: int = ROUTE_DESCENDANT_LIMIT) -> dict[str, Any]:
         """Map a working directory to enrolled project keys.
 
-        Reads only the registry: no project database, metrics store, or key is
-        opened. The result informs the agent which explicit `project` key to
-        pass; the server itself still never guesses a target.
+        Reads only the registry and the enrollment-decline list: no project
+        database, metrics store, or key is opened. The result informs the
+        agent which explicit `project` key to pass; the server itself still
+        never guesses a target.
         """
         registry = self._load_registry()
         try:
@@ -951,13 +969,53 @@ class ProjectMemory:
             {"project_root": root, "projects": [item["project"] for item in root_projects(root)]}
             for root in below[:limit]
         ]
+        unenrolled = None
+        if matched_root is None and not below:
+            repository = self.repository_root(target)
+            if repository and repository not in roots and repository not in self.declines.roots():
+                unenrolled = {"root": repository, "default_project_key": Path(repository).name}
         return {
             "path": str(target),
             "matched_root": matched_root,
             "projects": active,
             "descendants": descendants,
             "descendants_omitted": max(0, len(below) - limit),
+            "unenrolled_repository": unenrolled,
+            "cli": self.cli_command(),
         }
+
+    def decline_enrollment(self, path: str | None = None) -> dict[str, Any]:
+        try:
+            target = Path(canonical(path or os.getcwd()))
+        except (OSError, RuntimeError) as exc:
+            raise MemoryError(f"invalid path: {exc}", code="invalid_path", category="configuration", phase="route") from exc
+        root = self.repository_root(target) or str(target)
+        self.declines.decline(root)
+        return {"declined": root}
+
+    def session_audit(self, project: str, session_id: str | None = None, limit: int = 100) -> dict[str, Any]:
+        """List audit events, optionally only those written in one host session."""
+        entry = self.resolve_project_key(project)
+        if session_id is not None and not valid_session_id(session_id):
+            raise MemoryError("invalid session id", code="invalid_argument")
+        limit = max(1, min(int(limit), 1000))
+        query = (
+            "SELECT a.id, a.created_at, a.action, a.record_id, "
+            "json_extract(a.detail_json, '$.session_id') AS session_id, "
+            "r.kind, r.title, r.status FROM audit a LEFT JOIN records r ON r.id = a.record_id"
+        )
+        parameters: list[Any] = []
+        if session_id:
+            query += " WHERE json_extract(a.detail_json, '$.session_id') = ?"
+            parameters.append(session_id)
+        query += " ORDER BY a.id DESC LIMIT ?"
+        parameters.append(limit)
+        connection = self._connect(entry)
+        try:
+            events = [dict(row) for row in connection.execute(query, parameters)]
+        finally:
+            connection.close()
+        return {"project": entry["project_key"], "session_id": session_id, "events": events}
 
     def _db_path(self, entry: dict[str, Any]) -> Path:
         return self.data_home / "projects" / entry["project_id"] / "memory.sqlite3"
@@ -1282,6 +1340,9 @@ class ProjectMemory:
         )
 
     def _audit(self, connection: sqlite3.Connection, action: str, record_id: str | None, detail: dict[str, Any]) -> None:
+        session_id = self.sessions.current_session_id()
+        if session_id:
+            detail = {**detail, "session_id": session_id}
         connection.execute(
             "INSERT INTO audit(action,record_id,detail_json,created_at) VALUES(?,?,?,?)",
             (action, record_id, compact_json(detail), utc_now()),
@@ -3161,6 +3222,46 @@ TOOL_OPERATIONS = {
 }
 
 
+SESSION_WRITE_TOOLS = {
+    "project_memory_remember",
+    "project_memory_report_stale",
+    "project_memory_note_repetition",
+    "project_memory_finalize_solution",
+    "project_memory_store_test_asset",
+    "project_memory_record_log_location",
+    "project_memory_mark_used",
+    "project_memory_deprecate",
+}
+
+
+def record_session_use_safely(
+    memory: ProjectMemory,
+    name: str,
+    args: dict[str, Any],
+    result: dict[str, Any],
+    project_id: str | None,
+) -> None:
+    """Note which project the current host session used; never fails the tool call."""
+    try:
+        session_id = memory.sessions.current_session_id()
+        if not session_id or not project_id:
+            return
+        entry = memory._entry_by_id(memory._load_registry(), project_id)
+        if not entry:
+            return
+        checkpoint = None
+        if name == "project_memory_remember" and str(args.get("operation", "")).casefold() == "checkpoint":
+            checkpoint = {"record_id": result.get("id"), "stable_key": result.get("stable_key")}
+        memory.sessions.record_use(
+            session_id,
+            entry["project_key"],
+            write=name in SESSION_WRITE_TOOLS,
+            checkpoint=checkpoint,
+        )
+    except Exception:  # Session state is a convenience; the tool result stands.
+        pass
+
+
 def project_id_hint(memory: ProjectMemory, args: dict[str, Any]) -> str | None:
     if not isinstance(args, dict):
         return None
@@ -3280,6 +3381,7 @@ def call_tool(memory: ProjectMemory, name: str, args: dict[str, Any]) -> dict[st
                 response_bytes=serialized_bytes(result),
                 response_details=response_details,
             )
+        record_session_use_safely(memory, name, args, result, project_id)
         return result
     except Exception as exc:
         detail = describe_exception(exc)
@@ -3324,9 +3426,23 @@ def route_context(route: dict[str, Any]) -> str:
     """Render a route as a short routing note for agent context; empty when nothing applies."""
     projects = route["projects"]
     descendants = route["descendants"]
-    if not projects and not descendants:
+    unenrolled = route.get("unenrolled_repository")
+    if not projects and not descendants and not unenrolled:
         return ""
     lines = [f"Project Memory routing for `{route['path']}` (from the local enrollment registry):"]
+    if unenrolled:
+        cli = route.get("cli") or "codex-project-memory"
+        root = shlex.quote(unenrolled["root"])
+        lines.extend([
+            f"- Git repository `{unenrolled['root']}` is not enrolled in Project Memory. "
+            "When the task would benefit from durable project knowledge (troubleshooting, "
+            "multi-session work, test equipment), offer once to enroll it; do not interrupt "
+            "a quick question, and write no Project Memory records before enrollment.",
+            f"  - If the user agrees: `{cli} enroll --project-root {root} --yes` "
+            f"(default key `{unenrolled['default_project_key']}`; `--project-key KEY` overrides it; "
+            "add `--allow-test-secrets` only when the user says the project handles test-only credentials).",
+            f"  - If the user declines: `{cli} route --decline {root}` stops this offer.",
+        ])
     if projects:
         if len(projects) == 1:
             item = projects[0]
@@ -3366,11 +3482,43 @@ def route_context(route: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+SESSION_CONTEXT_SOURCES = {"resume", "compact"}
+
+
+def session_context(recent: list[dict[str, Any]], source: str) -> str:
+    """Render what the current host session already did with Project Memory."""
+    if not recent:
+        return ""
+    shown = recent[:5]
+    usage = "; ".join(
+        f"`{item['project']}` ({int(item.get('calls', 0))} calls, {int(item.get('writes', 0))} writes, "
+        f"last {item.get('last_used_at', 'unknown')})"
+        for item in shown
+    )
+    lines = [
+        f"Project Memory in this session ({source}):",
+        f"- Already used: {usage}. Keep using `{shown[0]['project']}` unless the task has moved to another project.",
+    ]
+    for item in shown:
+        checkpoint = item.get("last_checkpoint")
+        if isinstance(checkpoint, dict) and checkpoint.get("record_id"):
+            label = f"`{checkpoint['stable_key']}` " if checkpoint.get("stable_key") else ""
+            lines.append(
+                f"- Checkpoint {label}(record `{checkpoint['record_id']}`) was saved in this session in "
+                f"`{item['project']}`; read it with project_memory_read before continuing that work."
+            )
+    return "\n".join(lines)
+
+
 def claude_session_start_hook(path: str | None = None, memory: ProjectMemory | None = None) -> None:
     """Print Claude Code SessionStart output with the routing note for the session directory.
 
-    A hook must never break session start, so every failure is reported briefly
-    on stderr and the process still exits successfully without output.
+    Besides routing, it maps the host process (CLAUDE_PID) to the current
+    session ID so the MCP server attributes writes correctly after /clear or
+    resume, and on resume or compaction it recalls which project keys and
+    checkpoints this session already used. A hook must never break session
+    start, so every failure is reported briefly on stderr and the process
+    still exits successfully.
     """
     try:
         event: dict[str, Any] = {}
@@ -3380,9 +3528,27 @@ def claude_session_start_hook(path: str | None = None, memory: ProjectMemory | N
                 parsed = json.loads(raw)
                 if isinstance(parsed, dict):
                     event = parsed
+        memory = memory or ProjectMemory()
+        session_id = valid_session_id(event.get("session_id"))
+        source = event.get("source") if isinstance(event.get("source"), str) else "startup"
+        sections: list[str] = []
+        if session_id:
+            try:
+                host_pid = int(os.environ.get("CLAUDE_PID", "0") or 0)
+            except ValueError:
+                host_pid = 0
+            try:
+                if source == "startup":
+                    memory.sessions.prune()
+                memory.sessions.write_pointer(host_pid, session_id, source)
+                if source in SESSION_CONTEXT_SOURCES:
+                    sections.append(session_context(memory.sessions.recent_projects(session_id), source))
+            except OSError as exc:
+                print(f"project-memory: session state unavailable ({type(exc).__name__})", file=sys.stderr)
         cwd = event.get("cwd")
         target = path or (cwd if isinstance(cwd, str) and cwd else None) or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
-        text = route_context((memory or ProjectMemory()).route(target))
+        sections.append(route_context(memory.route(target)))
+        text = "\n\n".join(section for section in sections if section)
     except Exception as exc:  # Report the class only; never echo paths or values.
         print(f"project-memory: routing unavailable ({type(exc).__name__})", file=sys.stderr)
         return
@@ -3475,12 +3641,20 @@ def main() -> None:
         help="Show which enrolled project keys apply to a directory (reads only the registry)",
     )
     route_parser.add_argument("--path", help="Directory to route; defaults to the current directory")
+    route_parser.add_argument("--decline", metavar="PATH", help="Stop offering enrollment for the Git repository containing PATH")
     route_parser.add_argument("--format", choices=("json", "context"), default="json")
     route_parser.add_argument(
         "--hook",
         choices=("claude-session-start",),
         help="Read a Claude Code hook event from stdin and print hook output; never fails the session",
     )
+    audit_parser = subparsers.add_parser("audit", help="List audit events of one project, optionally for one host session")
+    audit_parser.add_argument("--project", required=True)
+    audit_parser.add_argument("--session", help="Host session ID; defaults to all sessions")
+    audit_parser.add_argument("--current-session", action="store_true", help="Use the session ID of the calling host session")
+    audit_parser.add_argument("--limit", type=int, default=100)
+    session_parser = subparsers.add_parser("session", help="Show what a host session did with Project Memory")
+    session_parser.add_argument("--session", help="Host session ID; defaults to the calling host session")
     args = parser.parse_args()
     if args.command == "route" and args.hook:
         claude_session_start_hook(args.path)
@@ -3537,6 +3711,18 @@ def main() -> None:
         print(memory.backup(args.project_root, args.project))
     elif args.command == "migrate":
         print(json.dumps(memory.migrate_databases(args.project, args.all_projects), ensure_ascii=False, indent=2))
+    elif args.command == "route" and args.decline:
+        print(json.dumps(memory.decline_enrollment(args.decline), ensure_ascii=False, indent=2))
+    elif args.command == "audit":
+        session = args.session or (memory.sessions.current_session_id() if args.current_session else None)
+        if args.current_session and not session:
+            parser.error("no host session ID is available")
+        print(json.dumps(memory.session_audit(args.project, session, args.limit), ensure_ascii=False, indent=2))
+    elif args.command == "session":
+        session = args.session or memory.sessions.current_session_id()
+        if not session:
+            parser.error("no host session ID is available; pass --session")
+        print(json.dumps({"session_id": session, "projects": memory.sessions.recent_projects(session)}, ensure_ascii=False, indent=2))
     elif args.command == "route":
         route = memory.route(args.path)
         if args.format == "context":

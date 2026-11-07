@@ -380,9 +380,11 @@ short routing note in the model context:
   it, up to 40;
 - anywhere else: nothing.
 
-The hook reads only `registry.json`. It opens no project database, key, or
-metrics store, and it exits successfully even when routing fails, so it can
-never block a session. The note is guidance only: the model still passes an
+The hook reads `registry.json`, the enrollment-decline list, and the state
+file of its own session, and writes only the session pointer described under
+[Sessions in Claude Code](#sessions-in-claude-code). It opens no project
+database, key, or metrics store, and it exits successfully even when routing
+fails, so it can never block a session. The note is guidance only: the model still passes an
 explicit `project` key and the server still never guesses a target. Put
 task-scope rules that the registry cannot express in `CLAUDE.md` or a
 Git-excluded `CLAUDE.local.md`. The hook lives outside `hooks/` on purpose:
@@ -400,6 +402,41 @@ Omit `--format context` for JSON. The hook runs on session start, resume,
 clear, and compaction. When work moves to another project in the middle of a
 session, the skill directs the model to run the same command for the new
 directory.
+
+When the session starts inside a Git repository that is not enrolled, has no
+enrolled projects below it, and is neither `/` nor the home directory, the note
+asks the model to offer enrollment once, with the exact `enroll` command to run
+after the user agrees and a `route --decline` command that stops the offer for
+that repository. Nothing is enrolled without the user's consent.
+
+### Sessions in Claude Code
+
+Folder routing stays the basis; the host session adds continuity and
+provenance on top of it:
+
+- The MCP server learns its session from `CLAUDE_CODE_SESSION_ID`. Because
+  the server keeps running across `/clear`, the SessionStart hook also writes
+  `sessions/pid-<CLAUDE_PID>.json`, which maps the Claude Code process to its
+  current session ID; the server prefers that pointer for its parent process.
+  `PROJECT_MEMORY_SESSION_ID` overrides both.
+- Every project-scoped call updates `sessions/session-<id>.json` with the keys
+  used, call and write counts, and the last checkpoint written in the session.
+  On resume and compaction the hook adds that summary to the context, so the
+  model keeps the chosen key and can reopen its checkpoint even when the
+  conversation summary lost them. Startup and `/clear` begin without it.
+- Each audit event written by a session carries its `session_id`. List what one
+  session wrote:
+
+  ```bash
+  codex-project-memory audit --project KEY --session SESSION_ID
+  codex-project-memory audit --project KEY --current-session   # from Claude Code
+  codex-project-memory session                                 # usage of the calling session
+  ```
+
+Session files expire after 30 days and pointers are removed once their Claude
+Code process has exited. `PROJECT_MEMORY_SESSIONS=0` disables session state and
+session provenance. Codex does not supply a session ID to MCP servers, so Codex
+calls carry none unless `PROJECT_MEMORY_SESSION_ID` is set.
 
 ### Tool approvals in Claude Code
 
@@ -649,6 +686,7 @@ python3 plugins/project-memory/scripts/test_project_memory_metrics.py
 python3 plugins/project-memory/scripts/test_project_memory_adaptive.py
 python3 plugins/project-memory/scripts/test_project_memory_benchmark.py
 python3 plugins/project-memory/scripts/test_project_memory_route.py
+python3 plugins/project-memory/scripts/test_project_memory_sessions.py
 python3 /path/to/plugin-creator/scripts/validate_plugin.py plugins/project-memory
 claude plugin validate .
 ```

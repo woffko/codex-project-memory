@@ -28,7 +28,7 @@ codex-project-memory-report = "project_memory_report:main"
 codex-project-memory-bench = "project_memory_bench:main"
 
 [tool.setuptools]
-py-modules = ["project_memory_mcp", "project_memory_metrics", "project_memory_report", "project_memory_views", "project_memory_bench"]
+py-modules = ["project_memory_mcp", "project_memory_metrics", "project_memory_report", "project_memory_views", "project_memory_bench", "project_memory_sessions"]
 
 [tool.setuptools.package-dir]
 "" = "scripts"

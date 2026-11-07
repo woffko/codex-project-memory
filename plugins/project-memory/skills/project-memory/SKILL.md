@@ -23,7 +23,20 @@ task-scope routing that the registry cannot express in `CLAUDE.md` or a
 Git-excluded `CLAUDE.local.md`. When work moves to another directory during a
 session, run the read-only
 `${XDG_DATA_HOME:-~/.local/share}/codex-project-memory/runtime/bin/codex-project-memory route --path DIR --format context`
-to get its mapping; it opens only the registry.
+to get its mapping; it opens no project database.
+
+When the routing note reports a Git repository that is not enrolled, offer
+enrollment once, and only when the task benefits from durable project
+knowledge. Run the quoted `enroll` command only after the user agrees, and the
+quoted `route --decline` command when the user refuses. Write no Project Memory
+records for an unenrolled repository.
+
+On resume or compaction the hook also lists the project keys and checkpoints
+that this host session already used; continue with them unless the task moved.
+Writes are attributed to the host session in the project audit:
+`codex-project-memory audit --project KEY --current-session` lists what this
+session wrote, for example to review, mark stale, or deprecate the records of
+a session that went wrong.
 
 Never create or modify an instruction file merely because this skill is
 installed.
