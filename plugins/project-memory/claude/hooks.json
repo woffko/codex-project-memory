@@ -1,0 +1,16 @@
+{
+  "description": "Add Project Memory routing for the session working directory to Claude Code context",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/claude-session-route.sh\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

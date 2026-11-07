@@ -1,6 +1,7 @@
 # Codex Project Memory
 
-Local, project-scoped operational memory for Codex, exposed through MCP. It
+Local, project-scoped operational memory for Codex and Claude Code, exposed
+through MCP. It
 optimizes total context per correctly completed task: useful knowledge remains
 losslessly local, while adaptive recall returns only the complete action core
 and supporting evidence needed now.
@@ -49,7 +50,8 @@ Coverage and omission metadata state what remains locally available.
 - Linux, macOS, or WSL;
 - Git;
 - Python 3.10+ with the `venv` module;
-- a recent Codex CLI with the `codex plugin` commands.
+- a recent Codex CLI with the `codex plugin` commands, a recent Claude Code
+  CLI with the `claude plugin` commands, or both.
 
 ## Install from scratch
 
@@ -62,10 +64,14 @@ chmod +x scripts/install.sh plugins/project-memory/scripts/run-project-memory.sh
 
 The installer creates an isolated Python runtime at
 `${XDG_DATA_HOME:-~/.local/share}/codex-project-memory/runtime`, installs the
-`cryptography` dependency, registers the cloned repository as a local Codex
-marketplace, and installs the `project-memory` plugin. It does not create,
-replace, or modify any `AGENTS.md` or `AGENTS.override.md` file. Project routing
-remains an explicit, separate configuration step.
+`cryptography` dependency, registers the cloned repository as a local
+marketplace, and installs the `project-memory` plugin. Without options it does
+this for every installed CLI; `--codex` or `--claude` selects one. Codex and
+Claude Code then share one runtime, registry, set of databases, key, and
+metrics store. It does not create, replace, or modify any `AGENTS.md`,
+`AGENTS.override.md`, or `CLAUDE.md` file, or Claude Code permissions. Project
+routing remains an explicit, separate configuration step. See
+[Use with Claude Code](#use-with-claude-code) for the Claude Code specifics.
 
 Installation also runs the repeat-safe content migration for all enrolled
 projects. A schema-1 database is backed up as
@@ -326,6 +332,89 @@ codex -C /path/to/project
 When resuming a session, choose the enrolled project directory if Codex asks
 which working directory to use.
 
+## Use with Claude Code
+
+The plugin directory is also a Claude Code plugin.
+[`.claude-plugin/marketplace.json`](.claude-plugin/marketplace.json) lists it,
+and `plugins/project-memory/.claude-plugin/plugin.json` registers the same MCP
+server, the bundled skill, and a SessionStart routing hook. Install it at user
+scope so that every Claude Code session receives it:
+
+```bash
+./scripts/install.sh --claude
+```
+
+Besides preparing the shared runtime, this runs:
+
+```bash
+claude plugin marketplace add /path/to/codex-project-memory --scope user
+claude plugin install project-memory@codex-project-memory --scope user
+```
+
+Without a clone, `claude plugin marketplace add woffko/codex-project-memory`
+followed by the same install command also works, but the server then still
+needs Python with the `cryptography` package, exactly as for the direct Codex
+GitHub method.
+
+Knowledge recorded from Codex is recalled from Claude Code and the other way
+round, because both use the same registry and databases. Claude Code loads a
+marketplace added from a local path in place, so it reads the plugin files
+from this checkout: keep the checkout on a branch that contains
+`.claude-plugin/`. The MCP server itself always runs from the installed
+runtime.
+
+### Routing in Claude Code
+
+Claude Code does not read `AGENTS.override.md`, and its documentation states
+that it reads `AGENTS.md` only when no `CLAUDE.md` applies. The plugin
+therefore adds a SessionStart hook, [`claude/hooks.json`](plugins/project-memory/claude/hooks.json),
+that runs `codex-project-memory route` for the session directory and places a
+short routing note in the model context:
+
+- inside an enrolled root: the key to pass, the parent and children, and
+  whether encrypted test-secret storage is enabled;
+- at a root with several logical projects: every key, the default first, with
+  an instruction to choose by task scope and to ask before writing when the
+  scope is ambiguous;
+- above enrolled roots, such as a home directory: the enrolled projects below
+  it, up to 40;
+- anywhere else: nothing.
+
+The hook reads only `registry.json`. It opens no project database, key, or
+metrics store, and it exits successfully even when routing fails, so it can
+never block a session. The note is guidance only: the model still passes an
+explicit `project` key and the server still never guesses a target. Put
+task-scope rules that the registry cannot express in `CLAUDE.md` or a
+Git-excluded `CLAUDE.local.md`. The hook lives outside `hooks/` on purpose:
+Codex discovers `hooks/hooks.json` in a plugin automatically, and this hook is
+meant for Claude Code only.
+
+Show the mapping for any directory:
+
+```bash
+~/.local/share/codex-project-memory/runtime/bin/codex-project-memory route \
+  --path /path/to/project --format context
+```
+
+Omit `--format context` for JSON. The hook runs on session start, resume,
+clear, and compaction. When work moves to another project in the middle of a
+session, the skill directs the model to run the same command for the new
+directory.
+
+### Tool approvals in Claude Code
+
+Claude Code names the plugin tools
+`mcp__plugin_project-memory_project_memory__<tool>`.
+[`examples/claude-settings.json`](examples/claude-settings.json) mirrors the
+Codex example: recall, reads, and ordinary writes run without a prompt, while
+storing or revealing test-only credentials, staging a Longrun handle, and
+deprecating a record always ask. Merge its `permissions` lists into
+`~/.claude/settings.json`. Tool search defers these MCP tool definitions until
+they are needed, so the default `admin` profile adds little context.
+
+Longrun is a Codex MCP server. In Claude Code, stage a test-asset handle only
+when a Longrun server is connected to the session.
+
 ## How a recurring action becomes a solution
 
 1. Codex calls `project_memory_recall` before repeating troubleshooting.
@@ -526,6 +615,10 @@ codex plugin add project-memory@codex-project-memory
 Start a new Codex thread after updating so the refreshed skill and MCP tool
 definitions are loaded.
 
+Claude Code reads a local-path plugin in place, so `git pull --ff-only` and
+`./scripts/install.sh --claude` are enough. Start a new session or run
+`/reload-plugins` to load the refreshed files.
+
 ## Quality and cost benchmark
 
 Run the bundled deterministic fixture across the legacy workflow and every
@@ -555,7 +648,9 @@ python3 plugins/project-memory/scripts/test_project_memory.py
 python3 plugins/project-memory/scripts/test_project_memory_metrics.py
 python3 plugins/project-memory/scripts/test_project_memory_adaptive.py
 python3 plugins/project-memory/scripts/test_project_memory_benchmark.py
+python3 plugins/project-memory/scripts/test_project_memory_route.py
 python3 /path/to/plugin-creator/scripts/validate_plugin.py plugins/project-memory
+claude plugin validate .
 ```
 
 The tracked plugin manifest uses a canonical SemVer version. Ordinary feature
@@ -576,8 +671,8 @@ plaintext credentials and project paths in metrics.
 ./scripts/uninstall.sh
 ```
 
-Uninstalling the plugin intentionally preserves local databases, usage
-metrics, sanitized errors, and backups.
+This removes the plugin from every installed CLI. Uninstalling intentionally
+preserves local databases, usage metrics, sanitized errors, and backups.
 
 ## License
 

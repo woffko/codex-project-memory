@@ -41,6 +41,14 @@ local paths or keys. At one directory level the override replaces, rather than
 extends, `AGENTS.md`, so it must preserve all guidance required from that
 directory. Do not store credentials in any Codex instruction file.
 
+Claude Code does not read `AGENTS.override.md`. Its plugin adds a SessionStart
+hook that runs `codex-project-memory route`, which reads only the registry and
+places the matching project keys and roots (or, above enrolled roots, up to 40
+enrolled roots and keys below the session directory) in the model context. It
+opens no content database, key, or metrics store, and it reports failures only
+by exception class. The note is routing guidance with the same non-authorizing
+status as instruction files.
+
 Child sessions should search their selected child memory and declared parent
 memory separately. Sibling memory is not implicitly searched or exposed.
 Same-root logical projects are an organizational routing boundary, not an
@@ -114,8 +122,8 @@ credential patterns. Credentials are accepted only by the dedicated
 Secret fields are encrypted with AES-256-GCM and are omitted from FTS indexes,
 ordinary and semantic indexes, materialized views, events, relations, metrics,
 checkpoints, provenance, derived context, exception messages, revisions, and
-normal record reads. Decryption uses a separate tool so Codex can apply an
-explicit approval rule.
+normal record reads. Decryption uses a separate tool so Codex and Claude Code
+can apply an explicit approval rule.
 
 `project_memory_stage_test_asset_for_longrun` is a non-revealing alternative
 for reviewed test-only automation. It decrypts one scalar field in-process,

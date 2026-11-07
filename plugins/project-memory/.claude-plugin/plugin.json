@@ -1,0 +1,26 @@
+{
+  "name": "project-memory",
+  "version": "0.5.1",
+  "description": "Local adaptive project memory with quality-preserving retrieval and private diagnostics.",
+  "author": {
+    "name": "woffko",
+    "url": "https://github.com/woffko"
+  },
+  "homepage": "https://github.com/woffko/codex-project-memory#readme",
+  "repository": "https://github.com/woffko/codex-project-memory",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "codex",
+    "mcp",
+    "memory",
+    "sqlite"
+  ],
+  "mcpServers": {
+    "project_memory": {
+      "command": "sh",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/run-project-memory.sh"]
+    }
+  },
+  "hooks": "./claude/hooks.json"
+}

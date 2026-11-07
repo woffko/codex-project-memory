@@ -48,6 +48,7 @@ DEFAULT_CARDS = 4
 MAXIMUM_CARDS = 8
 TOKEN_BYTE_RATIO = 3
 PROFILE_VALUES = {"lean", "compat", "admin"}
+ROUTE_DESCENDANT_LIMIT = 40
 DEFAULT_LONGRUN_SECRET_TTL_SEC = 300
 DEFAULT_LONGRUN_MAX_STDIN_SECRET_BYTES = 64 * 1024
 SECRET_PATTERNS = (
@@ -898,6 +899,65 @@ class ProjectMemory:
             category="configuration",
             phase="resolve_project",
         )
+
+    def route(self, path: str | None = None, descendant_limit: int = ROUTE_DESCENDANT_LIMIT) -> dict[str, Any]:
+        """Map a working directory to enrolled project keys.
+
+        Reads only the registry: no project database, metrics store, or key is
+        opened. The result informs the agent which explicit `project` key to
+        pass; the server itself still never guesses a target.
+        """
+        registry = self._load_registry()
+        try:
+            target = Path(canonical(path or os.getcwd()))
+        except (OSError, RuntimeError) as exc:
+            raise MemoryError(
+                f"invalid path: {exc}",
+                code="invalid_path",
+                category="configuration",
+                phase="route",
+            ) from exc
+        roots = registry["roots"]
+
+        def describe(entry: dict[str, Any]) -> dict[str, Any]:
+            described = self._describe_entry(registry, entry)
+            return {
+                "project": described["project_key"],
+                "project_name": described["project_name"],
+                "project_root": described["project_root"],
+                "is_default_for_root": described["is_default_for_root"],
+                "parent_project": described["parent_project"],
+                "children": described["children"],
+                "allow_test_secrets": bool(entry.get("allow_test_secrets")),
+            }
+
+        def root_projects(root: str) -> list[dict[str, Any]]:
+            return sorted(
+                (describe(entry) for entry in self._entries_for_root(registry, root)),
+                key=lambda item: (not item["is_default_for_root"], item["project"].casefold()),
+            )
+
+        matched_root = next(
+            (str(candidate) for candidate in (target, *target.parents) if str(candidate) in roots),
+            None,
+        )
+        active = root_projects(matched_root) if matched_root else []
+        below = sorted(
+            (root for root in roots if root != str(target) and Path(root).is_relative_to(target)),
+            key=str.casefold,
+        )
+        limit = max(0, int(descendant_limit))
+        descendants = [
+            {"project_root": root, "projects": [item["project"] for item in root_projects(root)]}
+            for root in below[:limit]
+        ]
+        return {
+            "path": str(target),
+            "matched_root": matched_root,
+            "projects": active,
+            "descendants": descendants,
+            "descendants_omitted": max(0, len(below) - limit),
+        }
 
     def _db_path(self, entry: dict[str, Any]) -> Path:
         return self.data_home / "projects" / entry["project_id"] / "memory.sqlite3"
@@ -3260,6 +3320,81 @@ def reported_error_result(exc: ReportedToolError) -> dict[str, Any]:
     }
 
 
+def route_context(route: dict[str, Any]) -> str:
+    """Render a route as a short routing note for agent context; empty when nothing applies."""
+    projects = route["projects"]
+    descendants = route["descendants"]
+    if not projects and not descendants:
+        return ""
+    lines = [f"Project Memory routing for `{route['path']}` (from the local enrollment registry):"]
+    if projects:
+        if len(projects) == 1:
+            item = projects[0]
+            lines.append(
+                f"- Active project key: `{item['project']}` (root `{item['project_root']}`). "
+                f"Pass project=\"{item['project']}\" on every Project Memory call."
+            )
+        else:
+            keys = ", ".join(f"`{item['project']}`" for item in projects)
+            default = next((item["project"] for item in projects if item["is_default_for_root"]), None)
+            lines.append(
+                f"- Root `{route['matched_root']}` has several logical project memories: {keys}"
+                + (f" (default `{default}`)" if default else "")
+                + ". Choose the key by task scope; ask before writing when the scope is ambiguous."
+            )
+        for item in projects:
+            details = []
+            if item["parent_project"]:
+                details.append(f"parent `{item['parent_project']}` (recall searches it by default)")
+            if item["children"]:
+                details.append("children " + ", ".join(f"`{child}`" for child in item["children"]))
+            if item["allow_test_secrets"]:
+                details.append("encrypted test-only credential storage enabled")
+            if details:
+                lines.append(f"- `{item['project']}`: " + "; ".join(details) + ".")
+    if descendants:
+        lines.append("- Enrolled projects below this directory; use the key of the project whose files the task touches:")
+        for item in descendants:
+            keys = ", ".join(f"`{key}`" for key in item["projects"])
+            lines.append(f"  - {keys}: `{item['project_root']}`")
+        if route["descendants_omitted"]:
+            lines.append(f"  - {route['descendants_omitted']} more not listed; run `codex-project-memory route --path DIR`.")
+    lines.append(
+        "- A more specific mapping in workspace instructions takes precedence. "
+        "Follow the project-memory skill for the recall and remember workflow."
+    )
+    return "\n".join(lines)
+
+
+def claude_session_start_hook(path: str | None = None, memory: ProjectMemory | None = None) -> None:
+    """Print Claude Code SessionStart output with the routing note for the session directory.
+
+    A hook must never break session start, so every failure is reported briefly
+    on stderr and the process still exits successfully without output.
+    """
+    try:
+        event: dict[str, Any] = {}
+        if not sys.stdin.isatty():
+            raw = sys.stdin.read(1_000_000)
+            if raw.strip():
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    event = parsed
+        cwd = event.get("cwd")
+        target = path or (cwd if isinstance(cwd, str) and cwd else None) or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+        text = route_context((memory or ProjectMemory()).route(target))
+    except Exception as exc:  # Report the class only; never echo paths or values.
+        print(f"project-memory: routing unavailable ({type(exc).__name__})", file=sys.stderr)
+        return
+    if text:
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": text,
+            },
+        }, ensure_ascii=False))
+
+
 def serve(memory: ProjectMemory | None = None) -> None:
     memory = memory or ProjectMemory()
     if memory.bound_project:
@@ -3335,7 +3470,21 @@ def main() -> None:
     migrate_selector = migrate_parser.add_mutually_exclusive_group(required=True)
     migrate_selector.add_argument("--project")
     migrate_selector.add_argument("--all", action="store_true", dest="all_projects")
+    route_parser = subparsers.add_parser(
+        "route",
+        help="Show which enrolled project keys apply to a directory (reads only the registry)",
+    )
+    route_parser.add_argument("--path", help="Directory to route; defaults to the current directory")
+    route_parser.add_argument("--format", choices=("json", "context"), default="json")
+    route_parser.add_argument(
+        "--hook",
+        choices=("claude-session-start",),
+        help="Read a Claude Code hook event from stdin and print hook output; never fails the session",
+    )
     args = parser.parse_args()
+    if args.command == "route" and args.hook:
+        claude_session_start_hook(args.path)
+        return
     memory = ProjectMemory(
         bound_project=getattr(args, "project", None) if args.command == "serve" else None,
         profile=getattr(args, "profile", None) if args.command == "serve" else None,
@@ -3388,6 +3537,14 @@ def main() -> None:
         print(memory.backup(args.project_root, args.project))
     elif args.command == "migrate":
         print(json.dumps(memory.migrate_databases(args.project, args.all_projects), ensure_ascii=False, indent=2))
+    elif args.command == "route":
+        route = memory.route(args.path)
+        if args.format == "context":
+            text = route_context(route)
+            if text:
+                print(text)
+        else:
+            print(json.dumps(route, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

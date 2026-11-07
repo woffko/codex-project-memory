@@ -1,6 +1,7 @@
 # Project Memory plugin
 
-This directory is the installable Codex plugin and Python MCP package. See the
+This directory is the installable Codex and Claude Code plugin and the Python
+MCP package. See the
 [repository README](../../README.md) for installation, project enrollment,
 hierarchical project-key routing, configuration, security boundaries, and
 usage examples. The default hot path is adaptive `recall` followed by a
@@ -17,6 +18,16 @@ For explicitly test-only assets, Codex can call
 stdin handle without receiving the plaintext. The manual
 `codex-longrun-secret` prompt is only a fallback when no encrypted asset is
 enrolled.
+
+In Claude Code, the SessionStart hook in `claude/hooks.json` adds the
+registry mapping for the session directory to the context; it reads only the
+registry. Install with:
+
+```bash
+/plugin install project-memory --marketplace woffko/codex-project-memory
+```
+
+or, from a clone, `./scripts/install.sh --claude`.
 
 Plugin installation does not create or modify `AGENTS.md` or
 `AGENTS.override.md`. Keep portable routing in an existing `AGENTS.md`, or use
@@ -56,4 +67,5 @@ python3 scripts/test_project_memory.py
 python3 scripts/test_project_memory_metrics.py
 python3 scripts/test_project_memory_adaptive.py
 python3 scripts/test_project_memory_benchmark.py
+python3 scripts/test_project_memory_route.py
 ```

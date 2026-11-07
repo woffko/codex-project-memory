@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__plugin_project-memory_project_memory__project_memory_recall",
+      "mcp__plugin_project-memory_project_memory__project_memory_read",
+      "mcp__plugin_project-memory_project_memory__project_memory_remember",
+      "mcp__plugin_project-memory_project_memory__project_memory_report_stale",
+      "mcp__plugin_project-memory_project_memory__project_memory_status",
+      "mcp__plugin_project-memory_project_memory__project_memory_search",
+      "mcp__plugin_project-memory_project_memory__project_memory_get",
+      "mcp__plugin_project-memory_project_memory__project_memory_note_repetition",
+      "mcp__plugin_project-memory_project_memory__project_memory_finalize_solution",
+      "mcp__plugin_project-memory_project_memory__project_memory_record_log_location",
+      "mcp__plugin_project-memory_project_memory__project_memory_mark_used",
+      "mcp__plugin_project-memory_project_memory__project_memory_stats"
+    ],
+    "ask": [
+      "mcp__plugin_project-memory_project_memory__project_memory_store_test_asset",
+      "mcp__plugin_project-memory_project_memory__project_memory_get_test_asset",
+      "mcp__plugin_project-memory_project_memory__project_memory_stage_test_asset_for_longrun",
+      "mcp__plugin_project-memory_project_memory__project_memory_deprecate"
+    ]
+  }
+}

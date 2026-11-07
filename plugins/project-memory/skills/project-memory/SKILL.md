@@ -6,15 +6,27 @@ description: Use local project-scoped MCP memory for recurring troubleshooting, 
 # Project Memory workflow
 
 Use Project Memory only with a project key explicitly mapped by active workspace
-instructions. Pass that key as `project` on every call unless the MCP server is
-explicitly project-bound. Legacy `project_root` selects only the default memory
-at that root and must not be used to guess among same-root logical projects.
+instructions or by the Project Memory routing note that the Claude Code
+SessionStart hook derives from the local enrollment registry. Pass that key as
+`project` on every call unless the MCP server is explicitly project-bound.
+Legacy `project_root` selects only the default memory at that root and must not
+be used to guess among same-root logical projects.
 
-Keep portable mappings in `AGENTS.md`. Put machine-specific paths and keys in a
-Git-excluded `AGENTS.override.md`. A same-directory override replaces rather
-than merges with `AGENTS.md`, so it must repeat every instruction from that
-directory that must remain active. Never create or modify an instruction file
-merely because this skill is installed.
+Codex: keep portable mappings in `AGENTS.md` and machine-specific paths and
+keys in a Git-excluded `AGENTS.override.md`. A same-directory override replaces
+rather than merges with `AGENTS.md`, so it must repeat every instruction from
+that directory that must remain active.
+
+Claude Code: the plugin's SessionStart hook supplies the registry mapping for
+the session directory. Claude Code does not read `AGENTS.override.md`; put
+task-scope routing that the registry cannot express in `CLAUDE.md` or a
+Git-excluded `CLAUDE.local.md`. When work moves to another directory during a
+session, run the read-only
+`${XDG_DATA_HOME:-~/.local/share}/codex-project-memory/runtime/bin/codex-project-memory route --path DIR --format context`
+to get its mapping; it opens only the registry.
+
+Never create or modify an instruction file merely because this skill is
+installed.
 
 ## Recall before repeating work
 
@@ -65,7 +77,8 @@ task needs it through the approval-gated secret-read tool.
 When a reviewed non-interactive Longrun command needs one stored test-asset
 field on stdin, prefer `project_memory_stage_test_asset_for_longrun`. It
 decrypts locally and returns only a short-lived one-time `stdin_secret_id`; the
-secret value never enters Codex context. Pass that handle directly to
+secret value never enters the agent context. Stage a handle only when a Longrun
+MCP server is connected to the current session to consume it. Pass that handle directly to
 `longrun.start_job` or `longrun.run_and_wait`. Do not ask the user to run
 `codex-longrun-secret` when a suitable encrypted test asset already exists;
 that helper is only a fallback for a credential not yet enrolled in Project
@@ -79,6 +92,13 @@ Never reproduce a retrieved secret in chat, ordinary memory, source files,
 Git, patches, logs, metrics, checkpoints, provenance, delegated prompts, or
 unrelated commands. Production, personal, and ambiguously classified secrets
 remain prohibited.
+
+## Relation to host memory
+
+Built-in host memory, such as Claude Code auto-memory, stays the place for user
+preferences, collaboration feedback, and cross-project notes. Store
+project-scoped operational knowledge here, and do not duplicate one fact in
+both stores.
 
 ## Maintenance
 
